@@ -12,7 +12,7 @@ cd <ПАПКА>
 git config user.name "Ваше имя"
 git config user.email "Ваш GitHub noreply или рабочий email"
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.firmware.lock
+.\.venv\Scripts\python.exe -m pip install -r requirements.dev.lock
 .\.venv\Scripts\python.exe scripts/setup_dev_env.py
 ```
 

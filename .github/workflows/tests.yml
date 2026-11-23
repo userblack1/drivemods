@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
-      - run: python -m pip install -r requirements.firmware.lock
+      - run: python -m pip install -r requirements.dev.lock
       - run: python -m pytest -q
       - run: python scripts/handoff_audit.py --history
       - run: git diff --check

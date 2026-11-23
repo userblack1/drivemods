@@ -12,13 +12,13 @@
 git clone https://github.com/userblack1/drivemods.git
 cd <ПАПКА_ПРОЕКТА>
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.firmware.lock
+.\.venv\Scripts\python.exe -m pip install -r requirements.dev.lock
 .\.venv\Scripts\python.exe scripts/setup_dev_env.py
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m drivemods_bot demo
 ```
 
-`requirements.firmware.lock` включает основной `requirements.lock` и Telethon для тестов прошивок. Только лицензиям достаточно `requirements.lock`; полный набор тестов требует оба. На Linux: `python3.12` и `.venv/bin/python` вместо Windows-путей.
+`requirements.firmware.lock` включает основной `requirements.lock` и Telethon для тестов прошивок. Только лицензиям достаточно `requirements.lock`; полный набор тестов требует requirements.dev.lock, включающий оба набора и библиотеки оптической проверки QR. На Linux: `python3.12` и `.venv/bin/python` вместо Windows-путей.
 
 `demo` работает локально с синтетическим ID и имитацией оплаты, создаёт `DEMO-NOT-A-LICENSE.txt` в `data/dev/`, не использует Telegram, Visa или магазин. Генератор `.env` отказывается перезаписывать существующий файл. `prepare.ps1` также готовит окружение, не копируя рабочие секреты.
 
@@ -52,7 +52,7 @@ py -3.12 -m venv .venv
 | docs/ | Инструкции и исторические исследования интеграций |
 | assets/branding/ | Аватары; личные изображения-референсы исключены |
 
-Зависимости — в pyproject.toml; закреплённые версии — requirements*.lock. Основные: aiogram 3.31.0, httpx 0.28.1, python-dotenv, qrcode/pypng; прошивки — Telethon 1.45.0; тесты — pytest. SSH-помощнику scripts/server_ops.py отдельно нужен Paramiko и доступ к VPS; это не зависимость самого бота. Его локальные библиотеки из data/ не передаются.
+Зависимости — в pyproject.toml; закреплённые версии — requirements*.lock. requirements.dev.lock добавляет Pillow/zxing-cpp для проверки QR по изображению. Основные: aiogram 3.31.0, httpx 0.28.1, python-dotenv, qrcode/pypng; прошивки — Telethon 1.45.0; тесты — pytest. SSH-помощнику scripts/server_ops.py отдельно нужен Paramiko и доступ к VPS; это не зависимость самого бота. Его локальные библиотеки из data/ не передаются.
 
 Прошивки не запускайте с серверной Telegram-сессией. Для разработки нужны другой бот, тестовый аккаунт и отдельный DATA_DIR; переменные в .firmware.env.example, детали в [docs/firmware-bot.md](docs/firmware-bot.md).
 
