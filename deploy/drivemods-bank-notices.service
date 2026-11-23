@@ -1,0 +1,29 @@
+[Unit]
+Description=DriveMods phone bank notices - capture only
+After=network.target
+
+[Service]
+Type=simple
+User=drivemods-bank-notices
+Group=drivemods-bank-notices
+WorkingDirectory=/opt/drivemods-bank-notices
+EnvironmentFile=/etc/drivemods-bank-notices.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nextmod-license-bot/.venv/bin/python /opt/drivemods-bank-notices/bank_notices.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=drivemods-bank-notices
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/drivemods-bank-notices
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

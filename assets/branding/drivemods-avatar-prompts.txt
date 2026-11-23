@@ -1,0 +1,11 @@
+Tool: built-in image_gen, edit mode (not CLI).
+Targets: nextmode-licence-v1.png and nextmode-sw-v1.png.
+Outputs: drivemods-licence-v1.png and drivemods-sw-v1.png.
+Visually verified: DriveMods / LICENCE; DriveMods / SW.
+
+LICENCE PROMPT
+Use case: text-localization. Edit target: the supplied existing square NextMode LICENCE Telegram avatar. Perform a minimal precise typography edit: replace ONLY the white word "NextMode" in the middle with "DriveMods", spelled D r i v e M o d s, capital D and M, no space. Keep the original bold white sans serif font, central alignment, baseline, and visual weight; adjust the word width slightly only as needed so it fits elegantly within the same circle. Keep the lower gold word "LICENCE" exactly as it is, uppercase L I C E N C E, seven letters. Final text on two separate lines: "DriveMods" / "LICENCE". Preserve the exact white sports-car silhouette above the word, its size, geometry and position, the fine gold circular rim, gold lower lettering, dark graphite background and its texture, square aspect ratio, and spacing. Everything except the NextMode word must remain unchanged. One finished opaque square avatar, no collage, no mockup, no extra marks or text. Keep all lettering safely inside the circular Telegram crop.
+
+SW PROMPT
+Use case: text-localization. Edit target: the supplied existing square NextMode SW Telegram avatar. Perform a minimal precise typography edit: replace ONLY the white word "NextMode" in the middle with "DriveMods", spelled D r i v e M o d s, capital D and M, no space. Keep the original bold white sans serif font, central alignment, baseline, and visual weight; adjust the word width slightly only as needed so it fits elegantly within the same circle. Keep the lower electric-cyan word "SW" exactly as it is. Final text on two separate lines: "DriveMods" / "SW". Preserve the exact white sports-car silhouette above the word, its size, geometry and position, the fine cyan circular rim, cyan lower lettering, dark graphite background and its texture, square aspect ratio, and spacing. Everything except the NextMode word must remain unchanged. One finished opaque square avatar, no collage, no mockup, no extra marks or text. Keep all lettering safely inside the circular Telegram crop.
+

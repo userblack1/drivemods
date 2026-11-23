@@ -1,0 +1,35 @@
+[Unit]
+Description=NextMod License Bot - server demo
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=nextmod-bot
+Group=nextmod-bot
+WorkingDirectory=/opt/nextmod-license-bot
+EnvironmentFile=/etc/nextmod-license-bot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUTF8=1
+ExecStartPre=/opt/nextmod-license-bot/.venv/bin/python -m drivemods_bot.server_demo --check
+ExecStart=/opt/nextmod-license-bot/.venv/bin/python -m drivemods_bot.server_demo
+Restart=always
+RestartSec=5
+TimeoutStopSec=40
+UMask=0077
+StateDirectory=nextmod-license-bot
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+BindReadOnlyPaths=/etc/nextmod-license-bot.hosts:/etc/hosts
+ReadWritePaths=/var/lib/nextmod-license-bot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

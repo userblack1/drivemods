@@ -1,0 +1,31 @@
+[Unit]
+Description=DriveMods capture-only bank notice alerts to the owner
+After=network-online.target drivemods-bank-notices.service
+Wants=network-online.target drivemods-bank-notices.service
+
+[Service]
+Type=simple
+User=nextmod-bot
+Group=nextmod-bot
+WorkingDirectory=/opt/nextmod-license-bot
+EnvironmentFile=/etc/nextmod-license-bot.env
+EnvironmentFile=/etc/drivemods-bank-notice-forwarder.env
+Environment=PYTHONPATH=/opt/nextmod-license-bot
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nextmod-license-bot/.venv/bin/python /opt/drivemods-bank-notices/bank_notice_forwarder.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+BindReadOnlyPaths=/etc/nextmod-license-bot.hosts:/etc/hosts
+ReadWritePaths=/var/lib/nextmod-license-bot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

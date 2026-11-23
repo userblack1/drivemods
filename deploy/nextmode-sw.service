@@ -1,0 +1,34 @@
+[Unit]
+Description=NextMode SW firmware bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=nextmode-sw
+Group=nextmode-sw
+WorkingDirectory=/opt/nextmode-sw
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUTF8=1
+ExecStartPre=/opt/nextmode-sw/.venv/bin/python -m firmware_bot check --env /etc/nextmode-sw.env
+ExecStart=/opt/nextmode-sw/.venv/bin/python -m firmware_bot run --env /etc/nextmode-sw.env
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=40
+UMask=0077
+StateDirectory=nextmode-sw
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+BindReadOnlyPaths=/etc/nextmode-sw.hosts:/etc/hosts
+ReadWritePaths=/var/lib/nextmode-sw
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

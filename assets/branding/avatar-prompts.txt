@@ -1,0 +1,25 @@
+NextMode Telegram avatars — generation record
+Tool: built-in image_gen (not CLI).
+Reference: references/nextmode-profile-reference.jpg — the existing NextMode brand profile logo.
+Deliverables: nextmode-sw-v1.png and nextmode-licence-v1.png.
+Text verified visually: NextMode / SW; NextMode / LICENCE.
+
+SW PROMPT
+Use case: logo-brand.
+Asset type: finished square Telegram bot avatar, 1024x1024, opaque background, one avatar only.
+Input image: reference image is the existing NextMode brand logo. Preserve the recognizable clean white sports-car side-profile silhouette and its elegant automotive identity. Derive a polished new SW bot avatar from this brand image.
+Scene/backdrop: deep graphite / near-black, exceptionally subtle dark gradient, uncluttered and crisp. Replace the blurry photo background with a sophisticated clean dark backdrop.
+Subject and composition: centered white sports-car outline above a large, immediately legible "NextMode" wordmark; beneath the wordmark a distinctive large "SW" designation in electric cyan-blue. Keep generous spacing, beautiful alignment, a strong iconic silhouette. A restrained fine cyan accent or partial circular rim can unify the avatar, without busy graphics.
+Typography: render exactly "NextMode" (N and M capitalized, no space), and on a separate line below exactly "SW". These are the ONLY words in the image. Clean premium automotive sans serif, readable weight rather than extremely hairline text. "NextMode" must be prominent and SW must read even at Telegram thumbnail size.
+Palette: graphite black, crisp white, controlled cool cyan-blue accent. No other colors.
+Composition constraints: all car and lettering fit safely inside a centered circular Telegram crop with at least 15% square-edge margins. The artwork fills a square canvas; do not show a phone, interface, mockup, comparison grid, paper, watermark, or multiple logos. Premium modern automotive software identity. Car outline and original NextMode style should remain recognizable, but no extra automotive manufacturer badges. High contrast, refined, production-ready raster avatar.
+
+LICENCE PROMPT
+Use case: logo-brand / precise-object-edit.
+Edit target: the supplied finished NextMode SW avatar. Create its matching LICENCE companion avatar.
+Preserve EXACTLY the white sports-car silhouette, its geometry and position, the white "NextMode" wordmark and its exact typography and size, the dark graphite backdrop, the centered circular composition, premium automotive style, clean edges and spacing.
+Make ONLY these two changes:
+1. Replace the lower word "SW" with the exact uppercase word "LICENCE" — spelling L I C E N C E, seven letters. Keep it centered below NextMode, on the same lower area. Fit the longer word elegantly by reducing its font size as necessary, keeping it bold, clearly readable, and no wider than the NextMode wordmark above. Do NOT write LICENSE, LICENCE SW, NEXTMODELICENCE, or any extra words.
+2. Change all cyan-blue accents, including the thin circular rim and lower designation, to refined warm metallic champagne-gold / amber. The car and NextMode lettering remain white. Keep the base dark.
+Text in final image, verbatim, on two lines: "NextMode" then "LICENCE".
+Output: one finished opaque square Telegram bot avatar, not a collage. Same visual family as the edit target, differentiated by the golden accent and LICENCE designation. Keep all artwork safe within the Telegram circular crop. No extra icons, manufacturer badges, labels, mockups, interface or watermark.
