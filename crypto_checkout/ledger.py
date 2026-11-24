@@ -138,7 +138,8 @@ class Ledger:
 
     def invoice(self, invoice_id, user_id, plan, source: Path, digest, start_block, *,
                 shared_address=None, allow_amount_suffix=False, ttl=1800, now_ms=None,
-                request_key=None, reuse_existing=False, max_pending_per_user=None):
+                request_key=None, reuse_existing=False, max_pending_per_user=None,
+                receiving_wallet=None):
         """Atomically allocate a never-reused payment identity.
 
         A request_key identifies one customer action permanently, including after
@@ -148,6 +149,8 @@ class Ledger:
         exhaustion raises rather than reassigning an old customer's payment.
         """
         import hashlib
+        if receiving_wallet is not None and shared_address is not None:
+            raise ValueError('Choose one receiving address strategy')
         if not isinstance(invoice_id,str) or not re.fullmatch(r'[0-9a-f]{32}', invoice_id) or plan not in PRICES:
             raise ValueError('Invalid order or plan')
         source = Path(source).resolve()
@@ -202,7 +205,13 @@ class Ledger:
                     (user_id, now)).fetchone()[0]
                 if pending >= max_pending_per_user:
                     raise ValueError('Pending customer invoice limit reached')
-            if shared_address:
+            if receiving_wallet is not None:
+                address = receiving_wallet.allocate(db,invoice_id)
+                address_bytes(address)
+                if db.execute('SELECT 1 FROM invoices WHERE address=?',(address,)).fetchone():
+                    raise ValueError('A receiving address must never be reused')
+                db.execute('INSERT INTO deposit_addresses(address,invoice_id) VALUES(?,?)',(address,invoice_id))
+            elif shared_address:
                 address_bytes(shared_address)
                 if not allow_amount_suffix:
                     raise ValueError('One shared address needs explicit approval of unique amounts')
