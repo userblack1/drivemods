@@ -26,7 +26,9 @@ Environment=PYTHONUTF8=1
 ExecCondition=/bin/sh -c 'case "$$(/usr/bin/systemctl show -p ActiveState --value drivemods-license-bot.service)" in inactive|failed) exit 0;; *) exit 1;; esac'
 # systemd 249 provides CREDENTIALS_DIRECTORY but does not support the later %d
 # specifier. Double dollars pass the variable through to this explicit shell.
-ExecStartPre=/bin/sh -c 'export CRYPTO_STORE_SESSION_FILE="$$CREDENTIALS_DIRECTORY/store-session.json"; exec /opt/drivemods-checkout/.venv/bin/python -m crypto_checkout.application --check --probe-browser --env-file "$$CREDENTIALS_DIRECTORY/app.env"'
+# On the deployed systemd 249, credentials are accessible in ExecStart but not
+# ExecStartPre. application --run performs the full read-only/browser preflight
+# before opening a ledger or starting a Telegram poller.
 ExecStart=/bin/sh -c 'export CRYPTO_STORE_SESSION_FILE="$$CREDENTIALS_DIRECTORY/store-session.json"; exec /opt/drivemods-checkout/.venv/bin/python -m crypto_checkout.application --run --env-file "$$CREDENTIALS_DIRECTORY/app.env"'
 Restart=on-failure
 RestartSec=30
