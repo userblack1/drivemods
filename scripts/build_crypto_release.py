@@ -18,10 +18,11 @@ sys.path.insert(0,str(ROOT))
 from scripts.handoff_audit import audit,indexed_blobs
 
 REQUIRED=frozenset({
-    'requirements.lock','requirements.dev.lock','README.md','HANDOFF.md',
+    'requirements.lock','requirements.dev.lock','requirements.checkout.lock','README.md','HANDOFF.md',
     'crypto_checkout/application.py','crypto_checkout/bot.py','crypto_checkout/checkout.py',
     'crypto_checkout/runtime.py','crypto_checkout/store_adapter.py','crypto_checkout/binance.py',
     'crypto_checkout/ledger.py','crypto_checkout/tron.py','crypto_checkout/fulfillment.py',
+    'crypto_checkout/card_vault.py','crypto_checkout/stripe_browser.py',
     'drivemods_bot/config.py','drivemods_bot/supplier.py',
     'deploy/drivemods-checkout.service','deploy/crypto-checkout.env.example',
 })

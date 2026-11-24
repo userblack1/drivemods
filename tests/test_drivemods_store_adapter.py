@@ -13,7 +13,7 @@ from crypto_checkout.binance import DepositCredit
 from crypto_checkout.demo import TEST_ADDRESS, synthetic_receipt
 from crypto_checkout.fulfillment import Engine
 from crypto_checkout.ledger import Ledger
-from crypto_checkout.drivemods import LicenseExpectation
+from crypto_checkout.drivemods import LicenseExpectation, source_order_marker
 from crypto_checkout.store_adapter import (
     CreationReplyContract, DriveModsPurchaseClient, DriveModsStoreAdapter,
     PurchaseReviewRequired, StoreJournal,
@@ -34,6 +34,11 @@ class PublicContractShop:
         self.checkout_fields = True
         self.extra_prices = []
         self.before_create = None
+        self.omit_device_id = False
+        self.omit_license_marker = False
+        self.notifications = 0
+        self.before_notify = None
+        self.notify_loss = False
 
     def owner(self):
         return {"__type": "Pointer", "className": "_User", "objectId": OWNER}
@@ -93,6 +98,10 @@ class PublicContractShop:
                 "product": body["prod"], "bundle": body["bndl"], "region": body["region"],
                 "deviceId": body["deviceId"], "licFileName": "device-license.bin",
                 "licFile": base64.b64encode(OUTPUT).decode()}
+            if self.omit_device_id:
+                del self.rows["License001"]["deviceId"]
+            if self.omit_license_marker:
+                del self.rows["License001"]["dealerComment"]
             if self.loss == "after_license":
                 raise httpx.ReadTimeout("fixture-session-must-not-leak")
             result = {"e": ""}  # No assumed record ID in the real unknown response.
@@ -111,6 +120,17 @@ class PublicContractShop:
             result = {"id": "cs_fixture", "client_secret": "cs_fixture_secret_fixture"}
             if self.checkout_fields:
                 result.update(amount_total=self.rows["Payment001"]["priceTotal"] * 100, currency="usd")
+        elif name == "setPaymentIsPaying":
+            self.notifications += 1
+            if self.before_notify is not None:
+                self.before_notify(body)
+            assert {k for k in body if not k.startswith("_")} == {"id", "appVersion"}
+            assert body["id"] == "Payment001" and body["appVersion"] == "1.3.3"
+            if self.rows["Payment001"]["paymentStatus"] == 1:
+                self.rows["Payment001"]["paymentStatus"] = 2
+            if self.notify_loss:
+                raise httpx.ReadTimeout("fixture-notification-session-must-not-leak")
+            result = None
         else:
             pytest.fail("Unexpected store function: " + name)
         return httpx.Response(200, json={"result": result})
@@ -132,7 +152,8 @@ def ledger_invoice(tmp_path, *, paid=True, plan="full"):
     return ledger, ledger.get(invoice["id"])
 
 
-async def setup_adapter(tmp_path, *, paid=True, executor=None, enabled=True, plan="full", verify_binding=True):
+async def setup_adapter(tmp_path, *, paid=True, executor=None, enabled=True, plan="full", verify_binding=True,
+                        binding_policy="strict", first_live_validation=False):
     ledger, invoice = ledger_invoice(tmp_path, paid=paid, plan=plan)
     shop = PublicContractShop()
     client = DriveModsPurchaseClient(allow_creates=True, transport=httpx.MockTransport(shop))
@@ -153,7 +174,8 @@ async def setup_adapter(tmp_path, *, paid=True, executor=None, enabled=True, pla
             "ProofLic01", "ProofPay01", OWNER, "full", "MB-S5WM", "FULL", None, "proof-device",
             hashlib.sha256(proof_source).hexdigest(), 9000, proof_marker), proof_source)
     adapter = DriveModsStoreAdapter(client, ledger, StoreJournal(tmp_path / "store.sqlite3"),
-                                    purchases_enabled=enabled, executor=executor)
+                                    purchases_enabled=enabled, executor=executor, binding_policy=binding_policy,
+                                    first_live_validation=first_live_validation)
     return adapter, shop, invoice
 
 
@@ -436,3 +458,186 @@ def test_creation_reply_contract_has_no_guessed_default_and_candidate_never_acti
         contract.parse({"e": "", "new_record": {"id": "OldRecord1"}}, **context)
     with pytest.raises(PurchaseReviewRequired):
         contract.parse({"e": "", "new_record": {"id": True}}, **context)
+
+
+def test_explicit_hash_marker_policy_runs_without_global_legacy_device_fields_and_reports_unverified_until_paid(tmp_path):
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, verify_binding=False, executor=executor,
+                                                     binding_policy="sha256_marker", first_live_validation=True)
+        shop.omit_device_id = True
+        executor.shop, executor.mode = shop, "paid_in_backend"
+        async with adapter.client:
+            assert adapter.binding_policy_configured is True
+            assert adapter.merchant_device_binding_verified is False
+            assert adapter.real_device_flow_verified is False
+            order = await adapter.prepare(invoice)
+            assert order.status == "unpaid" and adapter.real_device_flow_verified is False
+            marker = source_order_marker(invoice["id"], invoice["source_sha"])
+            assert shop.rows["License001"]["dealerComment"] == shop.rows["Payment001"]["dealerComment"] == marker
+            assert "deviceId" not in shop.rows["License001"]
+            assert (await adapter.pay(order.reference, "license:" + invoice["id"])).status == "paid"
+            assert await adapter.download(order.reference) == OUTPUT
+            assert adapter.real_device_flow_verified is True
+            assert adapter.merchant_device_binding_verified is False
+            assert executor.calls == shop.creates["checkout"] == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("record,value", [
+    ("License001", None), ("Payment001", None), ("License001", "truncated-marker"),
+    ("Payment001", "another-invoice-marker"),
+])
+def test_marker_mismatch_holds_before_checkout_or_card_execution(tmp_path, record, value):
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, verify_binding=False, executor=executor,
+                                                     binding_policy="sha256_marker", first_live_validation=True)
+        shop.omit_device_id = True
+        async with adapter.client:
+            order = await adapter.prepare(invoice)
+            shop.rows[record]["dealerComment"] = value
+            with pytest.raises(PurchaseReviewRequired):
+                await adapter.pay(order.reference, "license:" + invoice["id"])
+            assert executor.calls == shop.creates["checkout"] == 0
+            assert adapter.real_device_flow_verified is False
+    asyncio.run(run())
+
+
+def test_supplier_dropping_new_marker_stops_creation_without_payment_or_charge(tmp_path):
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, verify_binding=False, executor=executor,
+                                                     binding_policy="sha256_marker", first_live_validation=True)
+        shop.omit_device_id = shop.omit_license_marker = True
+        async with adapter.client:
+            with pytest.raises(PurchaseReviewRequired):
+                await adapter.prepare(invoice)
+            assert shop.creates == {"license": 1, "payment": 0, "checkout": 0}
+            assert executor.calls == 0
+            with pytest.raises(PurchaseReviewRequired):
+                await adapter.prepare(invoice)
+            assert shop.creates["license"] == 1
+    asyncio.run(run())
+
+
+def test_hash_marker_mode_requires_explicit_first_live_validation_and_does_not_reinterpret_existing_journal(tmp_path):
+    async def run():
+        adapter, _, invoice = await setup_adapter(tmp_path)
+        async with adapter.client:
+            with pytest.raises(ValueError, match="first-live"):
+                DriveModsStoreAdapter(adapter.client, adapter.ledger, adapter.journal, binding_policy="sha256_marker")
+            order = await adapter.prepare(invoice)
+            other = DriveModsStoreAdapter(adapter.client, adapter.ledger, adapter.journal, purchases_enabled=True,
+                                          binding_policy="sha256_marker", first_live_validation=True)
+            with pytest.raises(PurchaseReviewRequired, match="policy changed"):
+                await other.inspect(order.reference)
+    asyncio.run(run())
+
+
+def test_stripe_complete_notifies_supplier_once_after_committed_reservation_without_claiming_paid(tmp_path):
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, executor=executor)
+        reserved = []
+
+        def before_notify(body):
+            row = adapter.journal.get("DMCO-" + invoice["id"])
+            assert row["phase"] == "notifying" and row["payment_id"] == body["id"]
+            reserved.append(True)
+
+        shop.before_notify = before_notify
+        async with adapter.client:
+            order = await adapter.prepare(invoice)
+            result = await adapter.pay(order.reference, "license:" + invoice["id"])
+            assert result.status == "pending"  # Merchant payment is only 'paying', not paid.
+            assert shop.rows["Payment001"]["paymentStatus"] == 2
+            assert adapter.journal.get(order.reference)["phase"] == "pending"
+            assert reserved == [True] and shop.notifications == executor.calls == 1
+            assert adapter.real_device_flow_verified is False
+            assert (await adapter.pay(order.reference, "license:" + invoice["id"])).status == "pending"
+            assert shop.notifications == executor.calls == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("loss", ["before", "after"])
+def test_lost_submission_notification_is_never_retried_and_paid_is_reconciled_read_only(tmp_path, loss):
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, executor=executor)
+        async with adapter.client:
+            order = await adapter.prepare(invoice)
+            if loss == "before":
+                def timeout(_):
+                    raise httpx.ReadTimeout("fixture-notification-secret")
+                shop.before_notify = timeout
+            else:
+                shop.notify_loss = True
+            with pytest.raises(PurchaseReviewRequired, match="notification is uncertain") as caught:
+                await adapter.pay(order.reference, "license:" + invoice["id"])
+            assert "fixture-" not in str(caught.value)
+            assert adapter.journal.get(order.reference)["phase"] == "notifying"
+            assert (await adapter.pay(order.reference, "license:" + invoice["id"])).status == "pending"
+            assert shop.notifications == executor.calls == shop.creates["checkout"] == 1
+            for row in shop.rows.values():
+                row["paymentStatus"] = 3
+            assert (await adapter.inspect(order.reference)).status == "paid"
+            assert await adapter.download(order.reference) == OUTPUT
+            assert shop.notifications == executor.calls == shop.creates["checkout"] == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("result", ["action_required", "paid", "unknown", None])
+def test_challenge_or_bad_executor_return_never_notifies_supplier(tmp_path, result):
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, executor=executor)
+        executor.mode = result
+        async with adapter.client:
+            order = await adapter.prepare(invoice)
+            if result == "action_required":
+                assert (await adapter.pay(order.reference, "license:" + invoice["id"])).status == "action_required"
+            else:
+                with pytest.raises(PurchaseReviewRequired, match="unsupported state"):
+                    await adapter.pay(order.reference, "license:" + invoice["id"])
+            assert executor.calls == 1 and shop.notifications == 0
+    asyncio.run(run())
+
+
+def test_submission_notification_requires_creates_enabled_and_valid_identity(tmp_path):
+    async def run():
+        adapter, shop, _ = await setup_adapter(tmp_path)
+        async with adapter.client:
+            adapter.client.allow_creates = False
+            with pytest.raises(Exception):
+                await adapter.client.mark_payment_submitted("Payment001")
+            adapter.client.allow_creates = True
+            with pytest.raises(Exception):
+                await adapter.client.mark_payment_submitted("../another-payment")
+            assert shop.notifications == 0
+    asyncio.run(run())
+
+
+def test_engine_notification_timeout_enters_review_then_reconciles_without_second_charge(tmp_path):
+    class NoDelivery:
+        simulation = False
+
+        async def send(self, *_):
+            raise AssertionError("This test only reconciles")
+
+    async def run():
+        executor = ExplicitExecutor()
+        adapter, shop, invoice = await setup_adapter(tmp_path, executor=executor)
+        engine = Engine(adapter.ledger, adapter, NoDelivery(), live_purchase_enabled=True)
+        async with adapter.client:
+            assert await engine.step(invoice["id"])
+            shop.notify_loss = True
+            assert await engine.step(invoice["id"])
+            assert adapter.ledger.get(invoice["id"])["state"] == "purchase_review"
+            assert shop.notifications == executor.calls == 1
+            for row in shop.rows.values():
+                row["paymentStatus"] = 3
+            assert await engine.reconcile(invoice["id"])
+            assert adapter.ledger.get(invoice["id"])["state"] == "download_pending"
+            assert shop.notifications == executor.calls == 1
+    asyncio.run(run())

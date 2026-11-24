@@ -31,20 +31,25 @@ SUPPLIER_PAID_STATES = {'download_pending', 'downloading', 'ready', 'sending', '
 class ProductionReadiness:
     ready: bool
     missing: tuple[str, ...]
+    real_device_flow_verified: bool = False
 
     @classmethod
     def inspect(cls, ledger, store, delivery):
+        explicit_policy=getattr(store,'binding_policy_configured',None)
+        binding_check=('merchant_device_binding_verified' if explicit_policy is None else 'binding_policy_configured')
+        binding_verified=(getattr(store,'merchant_device_binding_verified',None) is True
+                          if explicit_policy is None else explicit_policy is True)
         checks = {
             'live_ledger': ledger.simulation is False,
             'exchange_credit_required': ledger.require_exchange_credit is True,
             'live_store': getattr(store, 'simulation', None) is False,
             'automatic_payment_ready': getattr(store, 'automatic_payment_ready', None) is True,
             'merchant_auth_verified': getattr(store, 'merchant_auth_verified', None) is True,
-            'merchant_device_binding_verified': getattr(store, 'merchant_device_binding_verified', None) is True,
+            binding_check: binding_verified,
             'live_delivery': getattr(delivery, 'simulation', None) is False,
         }
         missing = tuple(name for name, valid in checks.items() if not valid)
-        return cls(not missing, missing)
+        return cls(not missing, missing,getattr(store,'real_device_flow_verified',None) is True)
 
 
 class WorkerLock:
@@ -240,7 +245,7 @@ class RuntimeWorker:
         missing = result.missing
         if self.engine.live_purchase_enabled is not True:
             missing += ('live_purchase_enabled',)
-        return ProductionReadiness(not missing, missing)
+        return ProductionReadiness(not missing, missing,result.real_device_flow_verified)
 
     def health(self):
         report = {'checked_at_utc': datetime.now(timezone.utc).isoformat(),
@@ -251,6 +256,7 @@ class RuntimeWorker:
                   'supplier_orders_queued': self._supplier_queued,
                   'live_purchase_enabled': bool(self.engine.live_purchase_enabled),
                   'automatic_purchase_ready': self.readiness().ready,
+                  'real_device_flow_tested': self.readiness().real_device_flow_verified,
                   'readiness_missing': list(self.readiness().missing)}
         self.health_path.parent.mkdir(parents=True, exist_ok=True)
         part = self.health_path.with_suffix('.part')

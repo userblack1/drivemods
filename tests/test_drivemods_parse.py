@@ -11,7 +11,7 @@ import pytest
 
 from crypto_checkout.drivemods import (
     APP_ID, APP_VERSION, DriveModsError, DriveModsParseClient,
-    DriveModsVerificationError, LicenseExpectation,
+    DriveModsVerificationError, LicenseExpectation, source_order_marker,
 )
 
 
@@ -344,3 +344,71 @@ def test_invalid_saved_session_is_discarded_and_errors_are_sanitized(reply):
             with pytest.raises(DriveModsError):
                 client.export_session()
     asyncio.run(run())
+
+
+def marker_expectation(plan="full"):
+    original = expectation(plan)
+    invoice_id = "1" * 32
+    return replace(original, binding_policy="sha256_marker", invoice_id=invoice_id,
+                   dealer_comment=source_order_marker(invoice_id, original.source_sha256))
+
+
+def marker_rows(plan="full"):
+    rows = records(plan)
+    expected = marker_expectation(plan)
+    for row in rows.values():
+        row["dealerComment"] = expected.dealer_comment
+    del rows["License001"]["deviceId"]
+    return rows
+
+
+@pytest.mark.parametrize("plan", ["full", "eco"])
+def test_source_hash_policy_accepts_omitted_device_only_with_both_full_persisted_order_markers(plan):
+    async def run():
+        async with mock_client(marker_rows(plan))[0] as client:
+            await logged_in(client)
+            verified = await client.reconcile_paid_license(marker_expectation(plan), SOURCE)
+            assert verified.content == OUTPUT and verified.cost_cents == {"full": 9000, "eco": 6000}[plan]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("record,field,value", [
+    ("License001", "dealerComment", None), ("Payment001", "dealerComment", None),
+    ("License001", "dealerComment", "crypto-order:" + "1" * 32),
+    ("Payment001", "dealerComment", "crypto-order:" + "1" * 32 + ":" + "0" * 64),
+    ("License001", "dealerComment", "crypto-order:" + "2" * 32 + ":" + hashlib.sha256(SOURCE).hexdigest()),
+    ("License001", "deviceId", "conflicting-device"),
+    ("License001", "product", "another-product"), ("License001", "bundle", "ECO"),
+    ("License001", "region", "another-region"), ("License001", "paymentStatus", 2),
+    ("Payment001", "currency", 1), ("Payment001", "priceTotal", 60),
+    ("Payment001", "payItems", [{"id": "OtherLicense", "quantity": 1, "sum": 90}]),
+])
+def test_source_hash_policy_never_weakens_other_identity_payment_or_marker_checks(record, field, value):
+    rows = marker_rows()
+    rows[record][field] = value
+
+    async def run():
+        async with mock_client(rows)[0] as client:
+            await logged_in(client)
+            with pytest.raises(DriveModsVerificationError):
+                await client.reconcile_paid_license(marker_expectation(), SOURCE)
+    asyncio.run(run())
+
+
+def test_hash_marker_is_not_inferred_as_a_new_policy_by_the_default_reader():
+    async def run():
+        async with mock_client(marker_rows())[0] as client:
+            await logged_in(client)
+            expected = replace(marker_expectation(), binding_policy="strict")
+            with pytest.raises(DriveModsVerificationError):
+                await client.reconcile_paid_license(expected, SOURCE)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", [
+    {"invoice_id": None}, {"invoice_id": "other-invoice"}, {"dealer_comment": None},
+    {"dealer_comment": "crypto-order:" + "1" * 32}, {"binding_policy": "unknown"},
+])
+def test_hash_marker_policy_requires_exact_explicit_invoice_and_source_digest(change):
+    with pytest.raises(DriveModsVerificationError):
+        replace(marker_expectation(), **change)

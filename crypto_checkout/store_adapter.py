@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from .drivemods import (
     APP_VERSION, DriveModsError, DriveModsParseClient, DriveModsVerificationError,
-    LicenseExpectation, OwnedRecord, _cents, _object_id, _text, _valid_id,
+    LicenseExpectation, OwnedRecord, source_order_marker, _cents, _object_id, _text, _valid_id,
 )
 from .fulfillment import StoreOrder
 from .ledger import Ledger
@@ -134,7 +134,9 @@ class PaymentExecutor(Protocol):
 
     Must verify exact merchant, session, amount/currency and authorized card
     BEFORE submission. Must honor the persisted idempotency key and handle 3DS
-    as action_required. Returning 'paid' is deliberately not supported.
+    as action_required. 'pending' means Stripe's verified onComplete event was
+    observed, so the adapter may notify the supplier once. Merely opening or
+    queueing checkout is not 'pending'. Returning 'paid' is not supported.
     """
 
     @property
@@ -207,7 +209,7 @@ class DriveModsPurchaseClient(DriveModsParseClient):
 
     async def _cloud(self, name: str, params: dict, *, creates: bool = False):
         read_names = {"licenseGetInfo", "getUserPriceGroup", "getUserPriceItems"}
-        create_names = {"createNewLicense", "createPayment", "checkStripeOrder"}
+        create_names = {"createNewLicense", "createPayment", "checkStripeOrder", "setPaymentIsPaying"}
         if (name not in read_names | create_names or creates != (name in create_names)
                 or creates and not self.allow_creates):
             raise DriveModsError("DriveMods creation is disabled or unsupported")
@@ -376,6 +378,12 @@ class DriveModsPurchaseClient(DriveModsParseClient):
             raise PurchaseReviewRequired("Checkout amount and identity are not verified")
         return CheckoutSession(result["id"], payment.record_id, payment.total_cents, "USD", result["client_secret"])
 
+    async def mark_payment_submitted(self, payment_id: str) -> None:
+        """Observed web onComplete notification, never a local paid assertion."""
+        if not _valid_id(payment_id):
+            raise DriveModsVerificationError("Invalid submitted payment identity")
+        await self._cloud("setPaymentIsPaying", {"id": payment_id}, creates=True)
+
 
 class StoreJournal:
     """Independent local write-ahead journal; no card/session secrets are stored."""
@@ -435,11 +443,18 @@ class DriveModsStoreAdapter:
 
     def __init__(self, client: DriveModsPurchaseClient, ledger: Ledger, journal: StoreJournal,
                  *, purchases_enabled: bool = False, executor: PaymentExecutor | None = None,
-                 region: str | None = None):
+                 region: str | None = None, binding_policy: Literal["strict", "sha256_marker"] = "strict",
+                 first_live_validation: bool = False):
         if ledger.simulation or not ledger.require_exchange_credit:
             raise ValueError("Real store requires a real ledger with confirmed exchange credits")
+        if binding_policy not in ("strict", "sha256_marker") or type(first_live_validation) is not bool:
+            raise ValueError("Unknown supplier binding policy")
+        if binding_policy == "sha256_marker" and not first_live_validation:
+            raise ValueError("Source hash marker policy requires explicit first-live validation mode")
         self.client, self.ledger, self.journal = client, ledger, journal
         self.purchases_enabled, self.executor, self.region = purchases_enabled is True, executor, region
+        self.binding_policy, self.first_live_validation = binding_policy, first_live_validation
+        self._flow_verified_owner_id: str | None = None
 
     @property
     def merchant_auth_verified(self) -> bool:
@@ -450,10 +465,20 @@ class DriveModsStoreAdapter:
         return self.client.merchant_device_binding_verified
 
     @property
+    def binding_policy_configured(self) -> bool:
+        if self.binding_policy == "sha256_marker":
+            return self.first_live_validation is True
+        return self.merchant_device_binding_verified
+
+    @property
+    def real_device_flow_verified(self) -> bool:
+        return bool(self.client.identity and self._flow_verified_owner_id == self.client.identity.user_id)
+
+    @property
     def automatic_payment_ready(self) -> bool:
         # No concrete verified card executor ships with this project. Neither a
         # Parse login nor saved Link card nor purchase-enable flag proves this.
-        return (self.merchant_auth_verified and self.merchant_device_binding_verified
+        return (self.merchant_auth_verified and self.binding_policy_configured
                 and self.purchases_enabled and self.client.allow_creates
                 and self.executor is not None
                 and getattr(self.executor, "automatic_payment_ready", False) is True)
@@ -488,6 +513,8 @@ class DriveModsStoreAdapter:
         if not row:
             raise PurchaseReviewRequired("Store reference is not registered")
         binding = row["binding"]
+        if binding.get("binding_policy", "strict") != self.binding_policy:
+            raise PurchaseReviewRequired("Existing order supplier binding policy changed")
         self._confirmed(binding)
         if binding["owner_id"] != self.client.identity.user_id:
             raise PurchaseReviewRequired("Store account changed")
@@ -495,6 +522,9 @@ class DriveModsStoreAdapter:
         return row
 
     def _check_record(self, record: OwnedRecord, binding: dict, record_type: int, license_id=""):
+        policy = binding.get("binding_policy", "strict")
+        if policy == "sha256_marker" and binding["marker"] != source_order_marker(binding["id"], binding["source_sha"]):
+            raise PurchaseReviewRequired("Order source hash marker does not match the journal")
         if (record.owner_id != binding["owner_id"] or record.record_type != record_type
                 or record.is_active is not True or record.currency_id != 2
                 or record.total_cents != binding["cost_cents"] or record.payment_status not in (1, 2, 3)
@@ -502,8 +532,10 @@ class DriveModsStoreAdapter:
             raise PurchaseReviewRequired("Created store record does not match the order")
         if record_type == 2:
             offer = binding["offer"]
-            if any(record.details.get(k) != offer[v] for k, v in (
-                    ("product", "product"), ("bundle", "bundle"), ("region", "region"), ("deviceId", "device_id"))):
+            device_id = record.details.get("deviceId")
+            device_matches = device_id == offer["device_id"] or policy == "sha256_marker" and device_id is None
+            if not device_matches or any(record.details.get(k) != offer[v] for k, v in (
+                    ("product", "product"), ("bundle", "bundle"), ("region", "region"))):
                 raise PurchaseReviewRequired("Created license belongs to another device or package")
         else:
             items = record.details.get("payItems")
@@ -525,7 +557,7 @@ class DriveModsStoreAdapter:
     async def prepare(self, invoice: dict) -> StoreOrder:
         if not self.purchases_enabled or not self.client.allow_creates:
             raise PurchaseReviewRequired("Real store purchasing is not enabled")
-        if not self.merchant_device_binding_verified:
+        if not self.binding_policy_configured:
             raise PurchaseReviewRequired("Supplier device and order binding has not been verified")
         if not _valid_id(invoice.get("id")):
             raise PurchaseReviewRequired("Invalid client invoice identity")
@@ -536,8 +568,10 @@ class DriveModsStoreAdapter:
             source = self._source(confirmed)
             offer = await self.client.quote_device(source, confirmed["plan"], region=self.region)
             binding = {k: confirmed[k] for k in ("id", "plan", "source_path", "source_sha", "cost_cents", "txid", "exchange_deposit")}
-            binding.update(owner_id=self.client.identity.user_id, marker="crypto-order:" + confirmed["id"],
-                           offer=asdict(offer), license_rid="RQ-" + str(uuid4()))
+            binding.update(owner_id=self.client.identity.user_id,
+                           marker=source_order_marker(confirmed["id"], confirmed["source_sha"]),
+                           offer=asdict(offer), license_rid="RQ-" + str(uuid4()),
+                           binding_policy=self.binding_policy, first_live_validation=self.first_live_validation)
             self.journal.reserve(reference, binding)
         row = self._bound(reference)
         binding = row["binding"]
@@ -591,7 +625,8 @@ class DriveModsStoreAdapter:
         b, offer = row["binding"], row["binding"]["offer"]
         return LicenseExpectation(row["license_id"], row["payment_id"], b["owner_id"], b["plan"],
                                   offer["product"], offer["bundle"], offer["region"], offer["device_id"],
-                                  b["source_sha"], b["cost_cents"], b["marker"], row["output_sha"] or None)
+                                  b["source_sha"], b["cost_cents"], b["marker"], row["output_sha"] or None,
+                                  binding_policy=b.get("binding_policy", "strict"), invoice_id=b["id"])
 
     async def inspect(self, reference: str) -> StoreOrder:
         row = self._bound(reference)
@@ -605,6 +640,7 @@ class DriveModsStoreAdapter:
             verified = await self.client.reconcile_paid_license(self._expectation(row), self._source(row["binding"]))
             if row["phase"] != "paid":
                 self.journal.move(reference, row["phase"], "paid", output_sha=verified.sha256)
+            self._flow_verified_owner_id = self.client.identity.user_id
             return self._order(row, "paid")
         if row["phase"] == "paid":
             raise PurchaseReviewRequired("Previously confirmed store payment changed")
@@ -616,7 +652,7 @@ class DriveModsStoreAdapter:
     async def pay(self, reference: str, idempotency_key: str) -> StoreOrder:
         if not self.purchases_enabled or not self.client.allow_creates:
             raise PurchaseReviewRequired("Real store purchasing is not enabled")
-        if not self.merchant_device_binding_verified:
+        if not self.binding_policy_configured:
             raise PurchaseReviewRequired("Supplier device and order binding has not been verified")
         row = self._bound(reference)
         if idempotency_key != "license:" + row["binding"]["id"]:
@@ -640,7 +676,19 @@ class DriveModsStoreAdapter:
             raise PurchaseReviewRequired("Checkout execution is uncertain; read-only reconciliation is required") from None
         if result not in ("pending", "action_required"):
             raise PurchaseReviewRequired("Checkout executor returned an unsupported state")
-        self.journal.move(reference, "checkout_creating", result)
+        if result == "pending":
+            # Match the merchant web client's onComplete sequence. Reserve the
+            # notification before I/O too: after a lost reply we only read, never
+            # repeat this operation or submit another card charge.
+            self.journal.move(reference, "checkout_creating", "notifying")
+            self._bound(reference)
+            try:
+                await self.client.mark_payment_submitted(row["payment_id"])
+            except Exception:
+                raise PurchaseReviewRequired("Supplier submission notification is uncertain; read-only reconciliation is required") from None
+            self.journal.move(reference, "notifying", "pending")
+        else:
+            self.journal.move(reference, "checkout_creating", "action_required")
         return await self.inspect(reference)
 
     async def download(self, reference: str) -> bytes:
@@ -648,4 +696,5 @@ class DriveModsStoreAdapter:
         verified = await self.client.reconcile_paid_license(self._expectation(row), self._source(row["binding"]))
         if not row["output_sha"] or row["output_sha"] != verified.sha256:
             raise PurchaseReviewRequired("License has not been reconciled for delivery")
+        self._flow_verified_owner_id = self.client.identity.user_id
         return verified.content

@@ -1,7 +1,7 @@
 """Explicit production assembly and read-only preflight; no simulated fallback.
 
-The default executor is deliberately absent. Flags cannot fabricate a verified
-merchant card integration. --check creates no ledger, uploads, orders or charges.
+The owner-card browser executor is assembled only from explicit protected
+configuration. --check creates no ledger, uploads, orders or charges.
 """
 import argparse
 import asyncio
@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import time
 
@@ -36,7 +37,7 @@ _PRODUCTION_DIRS = ('/var/lib/nextmod-license-bot', '/var/lib/drivemods-license-
                     '/var/lib/nextmode-sw', '/var/lib/nextmode-sw-redirect',
                     '/var/lib/drivemods-crypto-observer', '/var/lib/drivemods-binance-observer',
                     '/var/lib/drivemods-bank-notices', '/var/lib/drivemods-bank-notice-forwarder')
-_OWN_DATABASES = {'crypto-orders.sqlite3', 'store-journal.sqlite3'}
+_OWN_DATABASES = {'crypto-orders.sqlite3', 'store-journal.sqlite3', 'card-journal.sqlite3'}
 
 
 class ConfigurationError(ValueError):
@@ -135,6 +136,12 @@ class ApplicationSettings:
     unique_cents_enabled: bool = False
     exclusive_poller_confirmed: bool = False
     region: str | None = None
+    card_vault_file: Path | None = field(default=None,repr=False)
+    card_key_file: Path | None = field(default=None,repr=False)
+    stripe_publishable_key: str = field(default='',repr=False)
+    browser_executable: Path | None = field(default=None,repr=False)
+    binding_policy: str = 'strict'
+    allow_first_live_validation: bool = False
 
     @classmethod
     def from_mapping(cls, values, *, root=ROOT):
@@ -163,14 +170,29 @@ class ApplicationSettings:
         if not re.fullmatch(r'[A-Za-z0-9_]{5,32}', username) or not username.casefold().endswith('bot'):
             raise ConfigurationError('Invalid setting: CRYPTO_EXPECTED_BOT_USERNAME')
         region = _string(values, 'CRYPTO_STORE_REGION') or None
-        return cls(data, token, key, secret, _string(values, 'TRONGRID_API_KEY'), address,
-                   _path(_string(values, 'CRYPTO_STORE_SESSION_FILE'), root),
-                   _path(_string(values, 'CRYPTO_STORE_BINDING_PROOF_FILE'), root),
-                   int(identity), username,
-                   _boolean(values, 'CRYPTO_STORE_CREATES_ENABLED'),
-                   _boolean(values, 'CRYPTO_LIVE_PURCHASES_ENABLED'),
-                   _boolean(values, 'CRYPTO_ALLOW_UNIQUE_CENT_AMOUNTS'),
-                   _boolean(values, 'CRYPTO_EXCLUSIVE_POLLER_CONFIRMED'), region)
+        policy=_string(values,'CRYPTO_BINDING_POLICY') or 'strict'
+        if policy not in {'strict','sha256_marker'}:
+            raise ConfigurationError('Invalid setting: CRYPTO_BINDING_POLICY')
+        first_validation=_boolean(values,'CRYPTO_ALLOW_FIRST_LIVE_VALIDATION')
+        if policy=='sha256_marker' and not first_validation:
+            raise ConfigurationError('CRYPTO_BINDING_POLICY requires CRYPTO_ALLOW_FIRST_LIVE_VALIDATION')
+        publishable=_string(values,'CRYPTO_STRIPE_PUBLISHABLE_KEY')
+        if publishable and not re.fullmatch(r'pk_live_[A-Za-z0-9]{16,256}',publishable):
+            raise ConfigurationError('Invalid setting: CRYPTO_STRIPE_PUBLISHABLE_KEY')
+        return cls(data_dir=data,bot_token=token,binance_key=key,binance_secret=secret,
+                   trongrid_key=_string(values,'TRONGRID_API_KEY'),address=address,
+                   session_file=_path(_string(values,'CRYPTO_STORE_SESSION_FILE'),root),
+                   binding_proof_file=_path(_string(values,'CRYPTO_STORE_BINDING_PROOF_FILE'),root),
+                   expected_bot_id=int(identity),expected_username=username,
+                   store_creates_enabled=_boolean(values,'CRYPTO_STORE_CREATES_ENABLED'),
+                   live_purchases_enabled=_boolean(values,'CRYPTO_LIVE_PURCHASES_ENABLED'),
+                   unique_cents_enabled=_boolean(values,'CRYPTO_ALLOW_UNIQUE_CENT_AMOUNTS'),
+                   exclusive_poller_confirmed=_boolean(values,'CRYPTO_EXCLUSIVE_POLLER_CONFIRMED'),region=region,
+                   card_vault_file=_path(_string(values,'CRYPTO_CARD_VAULT_FILE'),root),
+                   card_key_file=_path(_string(values,'CRYPTO_CARD_KEY_FILE'),root),
+                   stripe_publishable_key=publishable,
+                   browser_executable=_path(_string(values,'CRYPTO_BROWSER_EXECUTABLE'),root),
+                   binding_policy=policy,allow_first_live_validation=first_validation)
 
 
 def load_settings(env_file=None, *, environ=None, root=ROOT):
@@ -190,7 +212,30 @@ def load_settings(env_file=None, *, environ=None, root=ROOT):
                     raise ConfigurationError('Duplicate variable in private environment file')
                 values[binding.key] = binding.value or ''
     values.update(os.environ if environ is None else environ)
+    # Optional systemd credentials are discovered only when the owner installed
+    # them. Missing card files never invalidate an otherwise useful --check.
+    credential_dir=values.get('CREDENTIALS_DIRECTORY')
+    if isinstance(credential_dir,str) and credential_dir:
+        for name,filename in (('CRYPTO_CARD_VAULT_FILE','owner-card.enc'),
+                              ('CRYPTO_CARD_KEY_FILE','owner-card.key')):
+            candidate=Path(credential_dir)/filename
+            if not values.get(name) and candidate.is_file():
+                values[name]=str(candidate)
     return ApplicationSettings.from_mapping(values, root=root)
+
+
+def _owner_card_executor(settings):
+    if not (settings.card_vault_file and settings.card_key_file and settings.stripe_publishable_key):
+        return None,None
+    # Fixed local implementations only. Optional dependencies stay lazy so an
+    # unconfigured read-only check works without the browser/crypto extras.
+    from .card_vault import OwnerCardVault
+    from .stripe_browser import BrowserStripeExecutor
+    vault=OwnerCardVault(key_path=settings.card_key_file,vault_path=settings.card_vault_file)
+    executor=BrowserStripeExecutor(vault,settings.stripe_publishable_key,
+                                  settings.data_dir/'card-journal.sqlite3',
+                                  browser_executable=settings.browser_executable)
+    return executor,vault
 
 
 class ClientFactory:
@@ -209,6 +254,8 @@ class Resources:
     merchant: object | None = None
     telegram: object | None = None
     executor: object | None = None
+    card_vault: object | None = None
+    browser_runtime_probed: bool = False
 
 
 @asynccontextmanager
@@ -217,6 +264,11 @@ async def _resources(settings, *, factory=None, executor=None, run_mode=False):
     result = Resources(executor=executor)
     closers = []
     try:
+        if result.executor is None:
+            result.executor,result.card_vault=_owner_card_executor(settings)
+            close=getattr(result.executor,'close',None)
+            if callable(close):
+                closers.append(close)
         result.tron = factory.tron(settings)
         closers.append(result.tron.close)
         if settings.binance_key and settings.binance_secret:
@@ -282,6 +334,7 @@ async def _preflight(settings, resources):
               'tron_readable': False, 'binance_read_only_history': False,
               'merchant_auth_verified': False, 'merchant_base_usd_prices': False,
               'merchant_device_binding_verified': False, 'telegram_identity_verified': False,
+              'binding_policy_configured': False,
               'automatic_payment_ready': False,
               'store_creates_enabled': settings.store_creates_enabled,
               'live_purchases_enabled': settings.live_purchases_enabled,
@@ -327,23 +380,42 @@ async def _preflight(settings, resources):
     if checks['merchant_auth_verified']:
         await step('merchant_base_usd_prices', lambda: _prices(resources.merchant))
         await step('merchant_device_binding_verified', lambda: _verify_binding(resources.merchant, settings))
+    checks['binding_policy_configured']=(checks['merchant_device_binding_verified']
+        if settings.binding_policy=='strict' else settings.allow_first_live_validation is True)
     if resources.executor is not None:
         try:
             checks['automatic_payment_ready'] = resources.executor.automatic_payment_ready is True
         except Exception as exc:
             errors['automatic_payment_ready'] = {'error_type': type(exc).__name__}
-    return {'ready': all(checks.values()), 'checks': checks,
-            'missing': [name for name, passed in checks.items() if not passed],
+    required={name:passed for name,passed in checks.items() if name!='merchant_device_binding_verified'}
+    return {'ready': all(required.values()), 'checks': checks,
+            'missing': [name for name, passed in required.items() if not passed],
             'errors': errors, 'server_payment_executor_missing': resources.executor is None,
+            'binding_policy': settings.binding_policy,
+            'real_device_flow_tested': False,
+            'owner_card_vault_configured': bool(resources.card_vault and resources.card_vault.configured is True),
+            'browser_runtime_probed': resources.browser_runtime_probed,
+            'browser_runtime_verified': resources.browser_runtime_probed,
             'effects': {'customer_invoices_created': 0, 'device_uploads': 0,
                         'store_orders_created': 0, 'card_charges': 0,
                         'telegram_messages_sent': 0, 'telegram_pollers_started': 0}}
 
 
-async def check(settings, *, factory=None, executor=None):
+async def _probe_browser(settings,resources):
+    probe=getattr(resources.executor,'probe_runtime',None)
+    if callable(probe):
+        resources.browser_runtime_probed=(await probe()) is True
+    elif settings.browser_executable is not None:
+        from .stripe_browser import probe_browser_runtime
+        resources.browser_runtime_probed=(await probe_browser_runtime(settings.browser_executable)) is True
+
+
+async def check(settings, *, factory=None, executor=None, probe_browser=False):
     """Read-only connectivity/readiness check; no Ledger or StoreJournal exists."""
     validate_data_dir(settings.data_dir)
     async with _resources(settings, factory=factory, executor=executor) as resources:
+        if probe_browser:
+            await _probe_browser(settings,resources)
         return await _preflight(settings, resources)
 
 
@@ -352,6 +424,7 @@ async def run(settings, *, factory=None, executor=None, stop=None):
     validate_data_dir(settings.data_dir)
     factory = factory or ClientFactory()
     async with _resources(settings, factory=factory, executor=executor, run_mode=True) as resources:
+        await _probe_browser(settings,resources)
         report = await _preflight(settings, resources)
         if report['ready'] is not True:
             raise CheckoutUnavailable('Production prerequisites missing: ' + ', '.join(report['missing']))
@@ -361,7 +434,9 @@ async def run(settings, *, factory=None, executor=None, stop=None):
         ledger = Ledger(settings.data_dir / 'crypto-orders.sqlite3', simulation=False, require_exchange_credit=True)
         journal = StoreJournal(settings.data_dir / 'store-journal.sqlite3')
         store = DriveModsStoreAdapter(resources.merchant, ledger, journal, purchases_enabled=True,
-                                     executor=resources.executor, region=settings.region)
+                                     executor=resources.executor, region=settings.region,
+                                     binding_policy=settings.binding_policy,
+                                     first_live_validation=settings.allow_first_live_validation)
         delivery = factory.delivery(settings)
         try:
             watcher = ConcurrentWatcher(ledger, resources.tron, resources.exchange)
@@ -376,21 +451,80 @@ async def run(settings, *, factory=None, executor=None, stop=None):
             await delivery.close()
 
 
+async def _run_with_signals(settings, *, factory=None, executor=None):
+    """Stop admission/polling, drain the worker, then close clients on TERM/INT.
+
+    Cancelling the application also interrupts a browser probe or preflight.
+    Once the bot is running its finally block sets the worker stop event and
+    awaits the existing bounded worker drain before any clients are closed.
+    """
+    loop=asyncio.get_running_loop()
+    stop,requested=asyncio.Event(),asyncio.Event()
+    received=[]
+    handlers=[]
+    operation=waiter=None
+
+    def request(signum):
+        if not received:
+            received.append(signum)
+            stop.set()
+            requested.set()
+
+    try:
+        for signum in (signal.SIGTERM,signal.SIGINT):
+            previous=signal.getsignal(signum)
+            try:
+                loop.add_signal_handler(signum,request,signum)
+                handlers.append((signum,previous,True))
+            except (NotImplementedError,RuntimeError):
+                # Windows event loops do not implement add_signal_handler.
+                signal.signal(signum,lambda number,frame:loop.call_soon_threadsafe(request,number))
+                handlers.append((signum,previous,False))
+        operation=asyncio.create_task(run(settings,factory=factory,executor=executor,stop=stop))
+        waiter=asyncio.create_task(requested.wait())
+        done,_=await asyncio.wait({operation,waiter},return_when=asyncio.FIRST_COMPLETED)
+        if operation in done:
+            await operation
+        else:
+            operation.cancel()
+            try:
+                await operation
+            except asyncio.CancelledError:
+                pass
+        return received[0] if received else None
+    finally:
+        stop.set()
+        if waiter is not None:
+            waiter.cancel()
+            await asyncio.gather(waiter,return_exceptions=True)
+        if operation is not None and not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation,return_exceptions=True)
+        for signum,previous,uses_loop in reversed(handlers):
+            if uses_loop:
+                loop.remove_signal_handler(signum)
+            signal.signal(signum,previous)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true', help='Read-only preflight; creates no ledger or customer orders')
     mode.add_argument('--run', action='store_true', help='Requires verified production readiness and exclusive bot ownership')
     parser.add_argument('--env-file', type=Path, help='Optional explicit owner-only configuration file')
+    parser.add_argument('--probe-browser',action='store_true',
+                        help='With --check: explicitly launch an ephemeral blank browser; no card or payment')
     args = parser.parse_args()
+    if args.probe_browser and not args.check:
+        parser.error('--probe-browser requires --check')
     try:
         settings = load_settings(args.env_file)
         if args.check:
-            report = asyncio.run(check(settings))
+            report = asyncio.run(check(settings,probe_browser=args.probe_browser))
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0 if report['ready'] else 2
-        asyncio.run(run(settings))
-        return 0
+        stopped_by=asyncio.run(_run_with_signals(settings))
+        return 130 if stopped_by==signal.SIGINT else 0
     except (ConfigurationError, CheckoutUnavailable) as exc:
         print(json.dumps({'ready': False, 'error': str(exc)}, ensure_ascii=False))
         return 2

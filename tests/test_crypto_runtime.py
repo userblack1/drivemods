@@ -108,6 +108,22 @@ def test_live_flag_alone_cannot_start_a_purchase_worker(tmp_path):
     assert not worker.lock_path.exists()
 
 
+def test_explicit_binding_policy_cannot_fall_back_to_legacy_device_flag(tmp_path):
+    book=Ledger(tmp_path/'live.sqlite3',simulation=False)
+    class Store:
+        simulation=False
+        automatic_payment_ready=merchant_auth_verified=merchant_device_binding_verified=True
+        binding_policy_configured=False
+        real_device_flow_verified=False
+    class Delivery:simulation=False
+    store=Store()
+    result=ProductionReadiness.inspect(book,store,Delivery())
+    assert result.missing==('binding_policy_configured',) and not result.ready
+    store.binding_policy_configured=True
+    result=ProductionReadiness.inspect(book,store,Delivery())
+    assert result.ready and result.real_device_flow_verified is False
+
+
 def test_concurrent_chain_reads_are_bounded_and_bad_receipt_does_not_block_siblings(tmp_path):
     book = Ledger(tmp_path / 'live.sqlite3', simulation=False)
     invoices = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(6)]

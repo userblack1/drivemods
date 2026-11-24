@@ -82,6 +82,8 @@ class LicenseExpectation:
     # Optional additional binding to the bot order's exact dealer comment.
     dealer_comment: str | None = field(default=None, repr=False)
     license_sha256: str | None = None
+    binding_policy: Literal["strict", "sha256_marker"] = "strict"
+    invoice_id: str | None = None
 
     def __post_init__(self) -> None:
         if (not all(_valid_id(x) for x in (self.license_id, self.payment_id, self.owner_id))
@@ -95,8 +97,13 @@ class LicenseExpectation:
                 or self.region is not None and not _text(self.region)
                 or self.dealer_comment is not None and not _text(self.dealer_comment)
                 or self.license_sha256 is not None and (
-                    not isinstance(self.license_sha256, str) or not _SHA256.fullmatch(self.license_sha256))):
+                    not isinstance(self.license_sha256, str) or not _SHA256.fullmatch(self.license_sha256))
+                or self.binding_policy not in ("strict", "sha256_marker")
+                or self.invoice_id is not None and not _valid_id(self.invoice_id)):
             raise DriveModsVerificationError("Invalid expected license binding")
+        if self.binding_policy == "sha256_marker" and (
+                self.invoice_id is None or self.dealer_comment != source_order_marker(self.invoice_id, self.source_sha256)):
+            raise DriveModsVerificationError("Exact invoice and source hash marker is required")
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,14 @@ class VerifiedLicense:
 
 def _valid_id(value: Any) -> bool:
     return isinstance(value, str) and _ID.fullmatch(value) is not None
+
+
+def source_order_marker(invoice_id: str, source_sha256: str) -> str:
+    """An order identity plus exact Device ID binary hash, never an amount key."""
+    if (not _valid_id(invoice_id) or not isinstance(source_sha256, str)
+            or not _SHA256.fullmatch(source_sha256)):
+        raise DriveModsVerificationError("Invalid source order marker identity")
+    return "crypto-order:" + invoice_id + ":" + source_sha256
 
 
 def _text(value: Any) -> bool:
@@ -357,7 +372,14 @@ class DriveModsParseClient:
                 or item["quantity"] != 1 or _cents(item.get("sum")) != expected.cost_cents):
             raise DriveModsVerificationError("Payment item does not match the license")
         details = license_record.details
-        if (details.get("deviceId") != expected.device_id or details.get("product") != expected.product
+        device_id = details.get("deviceId")
+        device_matches = device_id == expected.device_id
+        if expected.binding_policy == "sha256_marker" and device_id is None:
+            # Constructor and BOTH record checks above require the complete
+            # persisted invoice+source SHA marker. Missing device metadata alone
+            # is never sufficient; a present conflicting identity still fails.
+            device_matches = True
+        if (not device_matches or details.get("product") != expected.product
                 or details.get("bundle") != expected.bundle or details.get("region") != expected.region):
             raise DriveModsVerificationError("License device or package does not match")
         encoded = details.get("licFile")

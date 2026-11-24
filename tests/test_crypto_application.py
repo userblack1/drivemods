@@ -4,8 +4,10 @@ from decimal import Decimal
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -257,3 +259,188 @@ def test_only_verified_run_assembles_real_components_and_one_bot_lifecycle(tmp_p
     assert len(calls) == 1 and (settings.data_dir / 'crypto-orders.sqlite3').is_file()
     assert (settings.data_dir / 'uploads').is_dir() and 'delivery.constructor' in factory.calls
     assert all(client.closed for client in factory.created)
+
+
+def test_marker_binding_requires_explicit_first_live_validation_and_preserves_untested_status(tmp_path):
+    values=environment(tmp_path,enabled=True)
+    values['CRYPTO_BINDING_POLICY']='sha256_marker'
+    with pytest.raises(ConfigurationError,match='CRYPTO_ALLOW_FIRST_LIVE_VALIDATION'):
+        ApplicationSettings.from_mapping(values,root=tmp_path)
+    values['CRYPTO_ALLOW_FIRST_LIVE_VALIDATION']='true'
+    settings=ApplicationSettings.from_mapping(values,root=tmp_path)
+    report=asyncio.run(check(settings,factory=Factory(),executor=SimpleNamespace(automatic_payment_ready=True)))
+    assert report['ready'] and report['checks']['binding_policy_configured']
+    assert not report['checks']['merchant_device_binding_verified']
+    assert report['binding_policy']=='sha256_marker' and report['real_device_flow_tested'] is False
+    assert not settings.data_dir.exists() and all(value==0 for value in report['effects'].values())
+
+
+def test_marker_runtime_readiness_does_not_forge_legacy_device_proof(tmp_path,monkeypatch):
+    values=environment(tmp_path,enabled=True)
+    values.update(CRYPTO_BINDING_POLICY='sha256_marker',CRYPTO_ALLOW_FIRST_LIVE_VALIDATION='true')
+    settings=ApplicationSettings.from_mapping(values,root=tmp_path)
+    seen=[]
+    async def bot(checkout,worker,**options):
+        store=worker.engine.store
+        assert store.binding_policy_configured is True
+        assert store.merchant_device_binding_verified is False and store.real_device_flow_verified is False
+        assert worker.readiness().ready and not worker.readiness().real_device_flow_verified
+        seen.append(True)
+    monkeypatch.setattr(application,'run_bot',bot)
+    asyncio.run(run(settings,factory=Factory(),executor=SimpleNamespace(automatic_payment_ready=True)))
+    assert seen==[True]
+
+
+def test_builtin_card_executor_is_lazy_and_only_explicit_probe_can_launch_browser(tmp_path,monkeypatch):
+    values=environment(tmp_path,enabled=True,proof=True)
+    values.update(CRYPTO_CARD_KEY_FILE=str(tmp_path/'private/card.key'),
+                  CRYPTO_CARD_VAULT_FILE=str(tmp_path/'private/card.enc'),
+                  CRYPTO_STRIPE_PUBLISHABLE_KEY='pk_live_'+'SYNTHETICKEY0000000000000',
+                  CRYPTO_BROWSER_EXECUTABLE=str(tmp_path/'private/chromium'))
+    settings=ApplicationSettings.from_mapping(values,root=tmp_path)
+    calls=[]
+    class Vault:
+        configured=True
+        def __init__(self,*,key_path,vault_path):
+            assert key_path==settings.card_key_file and vault_path==settings.card_vault_file
+        def load(self):raise AssertionError('Preflight must never decrypt the card')
+    class Executor:
+        automatic_payment_ready=False
+        def __init__(self,provider,publishable_key,journal_path,*,browser_executable):
+            assert isinstance(provider,Vault) and publishable_key==settings.stripe_publishable_key
+            assert journal_path==settings.data_dir/'card-journal.sqlite3' and not journal_path.exists()
+            assert browser_executable==settings.browser_executable
+            calls.append('constructor')
+        async def probe_runtime(self):
+            calls.append('blank-probe')
+            self.automatic_payment_ready=True
+            return True
+        async def close(self):calls.append('close')
+    monkeypatch.setitem(sys.modules,'crypto_checkout.card_vault',SimpleNamespace(OwnerCardVault=Vault))
+    monkeypatch.setitem(sys.modules,'crypto_checkout.stripe_browser',SimpleNamespace(BrowserStripeExecutor=Executor))
+    first=asyncio.run(check(settings,factory=Factory()))
+    assert first['ready'] is False and first['owner_card_vault_configured'] is True
+    assert first['browser_runtime_probed'] is False and calls==['constructor','close']
+    calls.clear()
+    second=asyncio.run(check(settings,factory=Factory(),probe_browser=True))
+    assert second['ready'] and second['browser_runtime_probed']
+    assert calls==['constructor','blank-probe','close']
+    assert not settings.data_dir.exists()
+    assert all(value==0 for value in second['effects'].values())
+
+
+def test_card_credentials_are_optional_and_discovered_without_reading_their_contents(tmp_path):
+    credentials=tmp_path/'credentials'
+    credentials.mkdir()
+    values={'CRYPTO_DATA_DIR':str(tmp_path/'new-state'),'CREDENTIALS_DIRECTORY':str(credentials)}
+    settings=load_settings(environ=values,root=tmp_path)
+    assert settings.card_key_file is settings.card_vault_file is None
+    for name in ('owner-card.key','owner-card.enc'):
+        (credentials/name).write_bytes(b'NOT A REAL KEY OR VAULT')
+    settings=load_settings(environ=values,root=tmp_path)
+    assert settings.card_key_file==credentials/'owner-card.key'
+    assert settings.card_vault_file==credentials/'owner-card.enc'
+
+
+def test_explicit_browser_probe_works_before_owner_card_consent_without_enabling_payment(tmp_path,monkeypatch):
+    from crypto_checkout import stripe_browser
+    values=environment(tmp_path,enabled=True,proof=True)
+    values['CRYPTO_BROWSER_EXECUTABLE']=str(tmp_path/'private/chromium')
+    settings=ApplicationSettings.from_mapping(values,root=tmp_path)
+    calls=[]
+    async def probe(executable):
+        assert executable==settings.browser_executable
+        assert settings.card_vault_file is settings.card_key_file is None
+        calls.append('blank-probe')
+        return True
+    monkeypatch.setattr(stripe_browser,'probe_browser_runtime',probe)
+    report=asyncio.run(check(settings,factory=Factory(),probe_browser=True))
+    assert report['browser_runtime_verified'] and report['browser_runtime_probed']
+    assert not report['ready'] and not report['checks']['automatic_payment_ready']
+    assert report['server_payment_executor_missing'] and not report['owner_card_vault_configured']
+    assert calls==['blank-probe'] and not settings.data_dir.exists()
+
+
+def test_run_probes_executor_before_customer_state_is_created(tmp_path,monkeypatch):
+    settings=ApplicationSettings.from_mapping(environment(tmp_path,enabled=True,proof=True),root=tmp_path)
+    calls=[]
+    class Executor:
+        automatic_payment_ready=False
+        async def probe_runtime(self):
+            assert not settings.data_dir.exists()
+            calls.append('probe')
+            self.automatic_payment_ready=True
+            return True
+    executor=Executor()
+    async def bot(checkout,worker,**options):
+        assert executor.automatic_payment_ready and worker.readiness().ready
+        calls.append('bot')
+    monkeypatch.setattr(application,'run_bot',bot)
+    asyncio.run(run(settings,factory=Factory(),executor=executor))
+    assert calls==['probe','bot']
+
+
+def test_probe_browser_cli_cannot_be_used_to_bypass_run_guards(monkeypatch):
+    monkeypatch.setattr(sys,'argv',['checkout','--run','--probe-browser'])
+    def forbidden(*args,**kwargs):raise AssertionError('Invalid CLI mode read credentials')
+    monkeypatch.setattr(application,'load_settings',forbidden)
+    with pytest.raises(SystemExit) as error:application.main()
+    assert error.value.code==2
+
+
+@pytest.mark.parametrize('signum',[signal.SIGTERM,signal.SIGINT])
+def test_application_signal_drains_runtime_before_closing_real_client_assembly(tmp_path,monkeypatch,signum):
+    settings=ApplicationSettings.from_mapping(environment(tmp_path,enabled=True,proof=True),root=tmp_path)
+    factory=Factory()
+    events=[]
+    previous={number:signal.getsignal(number) for number in (signal.SIGTERM,signal.SIGINT)}
+    async def bot(checkout,worker,*,stop,**options):
+        worker_task=asyncio.create_task(worker.run(stop))
+        await worker.started.wait()
+        async def in_flight():
+            await stop.wait()
+            await asyncio.sleep(0.03)
+            assert not any(client.closed for client in factory.created)
+            events.append('drained')
+        worker._jobs['synthetic-in-flight-job']=asyncio.create_task(in_flight())
+        # raise_signal exercises the Windows fallback without terminating the
+        # test process; on POSIX it exercises the event loop signal handler.
+        asyncio.get_running_loop().call_later(0.01,signal.raise_signal,signum)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stop.set()
+            await worker_task
+            events.append('worker-closed')
+    monkeypatch.setattr(application,'run_bot',bot)
+    received=asyncio.run(application._run_with_signals(settings,factory=factory,
+                            executor=SimpleNamespace(automatic_payment_ready=True)))
+    assert received==signum and events==['drained','worker-closed']
+    assert all(client.closed for client in factory.created)
+    assert all(signal.getsignal(number)==handler for number,handler in previous.items())
+    with sqlite3.connect(settings.data_dir/'crypto-orders.sqlite3') as db:
+        assert db.execute('SELECT count(*) FROM invoices').fetchone()[0]==0
+
+
+def test_signal_during_preflight_closes_clients_without_creating_customer_state(tmp_path,monkeypatch):
+    settings=ApplicationSettings.from_mapping(environment(tmp_path,enabled=True,proof=True),root=tmp_path)
+    factory=Factory()
+    async def blocked(settings,resources):
+        asyncio.get_running_loop().call_later(0.01,signal.raise_signal,signal.SIGTERM)
+        await asyncio.Event().wait()
+    monkeypatch.setattr(application,'_preflight',blocked)
+    result=asyncio.run(application._run_with_signals(settings,factory=factory,
+                             executor=SimpleNamespace(automatic_payment_ready=True)))
+    assert result==signal.SIGTERM and all(client.closed for client in factory.created)
+    assert not settings.data_dir.exists()
+
+
+@pytest.mark.parametrize('name,value',[('CRYPTO_BINDING_POLICY','unsafe'),
+    ('CRYPTO_ALLOW_FIRST_LIVE_VALIDATION','trust-anything'),
+    ('CRYPTO_STRIPE_PUBLISHABLE_KEY','sk_live_PRIVATE_SECRET_MUST_NEVER_ECHO')])
+def test_new_setting_validation_never_echoes_private_or_invalid_values(tmp_path,name,value):
+    values=environment(tmp_path)
+    values[name]=value
+    with pytest.raises(ConfigurationError) as error:
+        ApplicationSettings.from_mapping(values,root=tmp_path)
+    assert value not in str(error.value)
