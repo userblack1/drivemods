@@ -11,6 +11,10 @@ USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
 TRANSFER = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
 
+class HistoryPageLimit(RuntimeError):
+    """The caller must narrow its time interval, never advance a partial cursor."""
+
+
 def address_bytes(address: str) -> bytes:
     if not isinstance(address, str) or not re.fullmatch(r'T[1-9A-HJ-NP-Za-km-z]{33}', address):
         raise ValueError('Invalid TRON address')
@@ -120,11 +124,17 @@ class TronReader:
         receipt = await self._json('POST', '/walletsolidity/gettransactioninfobyid', json={'value': txid})
         return parse_solid_receipt(receipt, txid)
 
-    async def candidates(self, address: str, min_timestamp: int, *, max_pages=10) -> list[str]:
+    async def candidates(self, address: str, min_timestamp: int, *, max_timestamp=None, max_pages=10) -> list[str]:
         address_bytes(address)
+        if (type(min_timestamp) is not int or min_timestamp < 0
+                or (max_timestamp is not None and (type(max_timestamp) is not int or max_timestamp<min_timestamp))
+                or type(max_pages) is not int or not 1 <= max_pages <= 1000):
+            raise ValueError('Invalid bounded TRON history request')
         params = {'only_confirmed': 'true', 'only_to': 'true', 'limit': 200,
                   'contract_address': USDT, 'min_timestamp': min_timestamp,
                   'order_by': 'block_timestamp,asc'}
+        if max_timestamp is not None:
+            params['max_timestamp']=max_timestamp
         ids, fingerprints = [], set()
         for _ in range(max_pages):
             data = await self._json('GET', f'/v1/accounts/{address}/transactions/trc20', params=params)
@@ -142,4 +152,4 @@ class TronReader:
                 raise ValueError('Invalid history pagination; no cursor advanced')
             fingerprints.add(fingerprint)
             params['fingerprint'] = fingerprint
-        raise RuntimeError('History page limit reached; keep the original time window')
+        raise HistoryPageLimit('History page limit reached; keep the original time window')

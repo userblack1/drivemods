@@ -75,22 +75,23 @@ class Engine:
             return True
         if state in {'prepared','waiting_supplier','action_required'}:
             # Reserve the external operation across concurrent workers before I/O.
-            if not ledger.transition(invoice_id,state,'inspecting'):
+            if not ledger.transition(invoice_id,state,'inspecting',inspection_origin=state):
                 return False
             try:
                 order = await self.store.inspect(invoice['supplier_ref'])
                 self._check_order(invoice,order)
                 if order.status == 'paid':
-                    ledger.transition(invoice_id,'inspecting','download_pending',payment_ref=order.payment_reference)
+                    ledger.transition(invoice_id,'inspecting','download_pending',payment_ref=order.payment_reference,inspection_origin=None)
                 elif order.status == 'action_required':
-                    ledger.transition(invoice_id,'inspecting','action_required',error='Visa authentication required')
+                    ledger.transition(invoice_id,'inspecting','action_required',error='Visa authentication required',inspection_origin=None)
                 elif order.status == 'pending':
-                    ledger.transition(invoice_id,'inspecting','waiting_supplier')
+                    ledger.transition(invoice_id,'inspecting','waiting_supplier',inspection_origin=None)
                 elif state != 'prepared':
                     # A return to unpaid after an attempted charge is not permission to charge again.
-                    ledger.transition(invoice_id,'inspecting','purchase_review',error='Uncertain store payment')
+                    ledger.transition(invoice_id,'inspecting','purchase_review',error='Uncertain store payment',inspection_origin=None)
                 else:
-                    ledger.transition(invoice_id,'inspecting','charging')
+                    if not ledger.transition(invoice_id,'inspecting','charging',inspection_origin=None):
+                        return False
                     try:
                         paid = await self.store.pay(order.reference,'license:'+invoice_id)
                         self._check_order(invoice,paid)
@@ -100,7 +101,7 @@ class Engine:
                     except Exception as exc:
                         ledger.transition(invoice_id,'charging','purchase_review',error='Uncertain charge: '+type(exc).__name__)
             except Exception as exc:
-                ledger.transition(invoice_id,'inspecting',state,error='Read failed: '+type(exc).__name__)
+                ledger.transition(invoice_id,'inspecting',state,error='Read failed: '+type(exc).__name__,inspection_origin=None)
             return True
         if state == 'download_pending':
             if not ledger.transition(invoice_id,state,'downloading'):

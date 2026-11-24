@@ -29,8 +29,37 @@ verified chain, exchange, store and Telegram adapters and starts one worker.
 - `RuntimeWorker(ledger, watcher, engine)` independently schedules payment
   scans and fulfillment. An unfinished store call does not block chain
   scanning or another customer's already prepared file delivery. Card/store
-  operations are serialized; downloads and delivery have a separate bounded
-  pool. Duplicate scheduling of an active invoice is suppressed.
+  operations use one durable supplier slot; downloads and delivery have a
+  separate bounded pool. Duplicate scheduling of an active invoice is suppressed.
+
+## Supplier's one-unpaid-order quota
+
+The supplier account currently permits only one unpaid license. Serializing
+individual API calls is insufficient: another customer's preparation must not
+run between the first customer's preparation and its payment confirmation.
+Before scheduling a purchase job, the worker atomically reserves
+`supplier_slot_invoice` in the existing ledger metadata and appends an audit
+event. Only this invoice can advance supplier preparation/payment. Other paid
+customers remain in the durable FIFO queue rather than becoming tasks waiting
+behind an asyncio lock.
+
+An already unfinished preparation, inspection, charge, supplier wait,
+authentication challenge or purchase review has priority over an unstarted
+paid invoice. Ownership survives process restarts and scheduling rounds. A
+missing supplier reference after an uncertain write still holds the slot.
+The slot releases only after the owner reaches a post-payment state
+(`download_pending` or later) with its recorded store payment reference. The
+release is audited. A lost owner or a post-payment state missing payment proof
+blocks new supplier creation safely; neither is silently reassigned.
+
+After that proof, the next customer may begin its supplier purchase while the
+previous customer's download or Telegram delivery continues. Receipt scanning
+and already verified file delivery remain independent even if a supplier slot
+is waiting on 3DS or an uncertain operation. A challenge/review can therefore
+delay later purchases until resolved, as required by the supplier's quota; it
+does not authorize another charge or an additional unpaid supplier license.
+The reservation belongs to this ledger and worker. A separate application
+using the same dealer account must not bypass the shared supplier limit.
 
 ## Production gate
 
@@ -87,10 +116,10 @@ contains readiness flags, safe error types and job counts, without tokens,
 user IDs, file paths, addresses or transaction details.
 
 The present shared-address provider has a lifetime limit of 198 distinct
-invoice amounts across the two plans; the worker's oldest-first batch of
-1,000 invoices therefore covers its entire capacity. A future provider with
-more addresses/invoices needs an independently reviewed paging/fairness
-policy before raising that capacity.
+invoice amounts across the two plans. Supplier-slot selection examines all
+relevant rows so an older unresolved reservation cannot be hidden behind a
+batch limit. A future provider with more addresses/invoices needs an
+independently reviewed paging/fairness policy before raising that capacity.
 
 ## Verification
 
@@ -100,7 +129,7 @@ python -m pytest tests/test_crypto_runtime.py -q
 
 Tests use explicit mock transports and labeled simulation adapters. They
 exercise a real cross-process lock, concurrent verification bounds, serialized
-card operations, independent verification/delivery while another purchase
+card operations under an enforced one-unpaid-order supplier quota, independent verification/delivery while another purchase
 waits, uncertain-charge reconciliation, delivery-only retry, and private
 Telegram destination and token-log protection. They do not prove that real
 DriveMods unattended checkout or real client payments have been connected.

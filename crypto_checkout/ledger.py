@@ -52,6 +52,8 @@ class Ledger:
             columns={row['name'] for row in db.execute('PRAGMA table_info(invoices)')}
             if 'delivery_ref' not in columns:
                 db.execute('ALTER TABLE invoices ADD COLUMN delivery_ref TEXT')
+            if 'inspection_origin' not in columns:
+                db.execute('ALTER TABLE invoices ADD COLUMN inspection_origin TEXT')
             marker = db.execute("SELECT value FROM metadata WHERE key='simulation'").fetchone()
             if marker and marker[0] != str(simulation):
                 raise ValueError('Simulation and real invoices cannot share a ledger')
@@ -271,9 +273,11 @@ class Ledger:
         return True
 
     def transition(self, invoice_id, before, after, **fields):
-        allowed = {'supplier_ref','payment_ref','output_path','output_sha','error'}
+        allowed = {'supplier_ref','payment_ref','output_path','output_sha','error','inspection_origin'}
         if set(fields)-allowed:
             raise ValueError('Unsupported fields')
+        if fields.get('inspection_origin') not in {None,'prepared','waiting_supplier','action_required'}:
+            raise ValueError('Invalid inspection origin')
         with self.connection() as db:
             changed = db.execute('UPDATE invoices SET state=?'+''.join(','+k+'=?' for k in fields)+' WHERE id=? AND state=?',
                                  (after,*fields.values(),invoice_id,before)).rowcount
@@ -302,11 +306,19 @@ class Ledger:
     def recover(self):
         with self.connection() as db:
             # Ambiguous external writes must be reconciled, never repeated.
-            for state in ('preparing','charging','inspecting'):
+            for state in ('preparing','charging'):
                 ids=[row['id'] for row in db.execute('SELECT id FROM invoices WHERE state=?',(state,))]
                 db.execute("UPDATE invoices SET state='purchase_review',error=? WHERE state=?",('restart_during_'+state,state))
                 for invoice_id in ids:
                     self._event(db,invoice_id,'restart_during_'+state)
+            for row in db.execute("SELECT id,inspection_origin FROM invoices WHERE state='inspecting'").fetchall():
+                origin=row['inspection_origin']
+                if origin in {'prepared','waiting_supplier','action_required'}:
+                    db.execute('UPDATE invoices SET state=?,inspection_origin=NULL WHERE id=?',(origin,row['id']))
+                else:
+                    db.execute("UPDATE invoices SET state='purchase_review',inspection_origin=NULL,"
+                               "error='restart_during_inspecting' WHERE id=?",(row['id'],))
+                self._event(db,row['id'],'restart_during_inspecting')
             for before,after in (('sending','ready'),('downloading','download_pending')):
                 ids=[row['id'] for row in db.execute('SELECT id FROM invoices WHERE state=?',(before,))]
                 db.execute('UPDATE invoices SET state=? WHERE state=?',(after,before))

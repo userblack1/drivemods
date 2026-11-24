@@ -1,6 +1,7 @@
 """Binance deposit history only. No trading, transfers, withdrawals or card access."""
 from dataclasses import dataclass
 from decimal import Decimal,InvalidOperation
+from email.utils import parsedate_to_datetime
 import hashlib
 import hmac
 import time
@@ -99,6 +100,8 @@ class BinanceReader:
         self._secret=api_secret.encode()
         self._clock=clock
         self._permissions_checked_at=None
+        self._signing_offset=0.0
+        self._offset_checked_at=None
         self._client=httpx.AsyncClient(base_url='https://api.binance.com',
               headers={'X-MBX-APIKEY':api_key},timeout=20,trust_env=False,follow_redirects=False,transport=transport)
 
@@ -109,29 +112,52 @@ class BinanceReader:
         allowed={'/sapi/v1/capital/deposit/hisrec','/sapi/v1/account/apiRestrictions'}
         if path not in allowed:
             raise ValueError('This client only reads deposits and key permissions')
-        query=urlencode({**params,'timestamp':int(self._clock()*1000),'recvWindow':5000})
-        signature=hmac.new(self._secret,query.encode(),hashlib.sha256).hexdigest()
-        try:
-            response=await self._client.get(path+'?'+query+'&signature='+signature)
-        except Exception as exc:
-            name=type(exc).__name__
-            network_type=name if name in _NETWORK_ERROR_TYPES else None
-            raise BinanceReadError(network_type or 'UnexpectedError',network_type=network_type) from None
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError:
-            error_code=None
+        # Only these idempotent GETs are eligible for one timestamp retry.
+        # A fresh signature is built after the failed connection/request, never
+        # reused after a slow TLS handshake. No card/store operation uses this.
+        for attempt in range(2):
+            now=self._clock()
+            if self._offset_checked_at is None or not 0<=now-self._offset_checked_at<=300:
+                self._signing_offset=0.0
+                self._offset_checked_at=None
+            query=urlencode({**params,'timestamp':int((now+self._signing_offset)*1000),'recvWindow':10000})
+            signature=hmac.new(self._secret,query.encode(),hashlib.sha256).hexdigest()
             try:
-                body=response.json()
-                if isinstance(body,dict):
-                    error_code=body.get('code')
+                response=await self._client.get(path+'?'+query+'&signature='+signature)
+            except Exception as exc:
+                name=type(exc).__name__
+                network_type=name if name in _NETWORK_ERROR_TYPES else None
+                raise BinanceReadError(network_type or 'UnexpectedError',network_type=network_type) from None
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                error_code=None
+                try:
+                    body=response.json()
+                    if isinstance(body,dict):
+                        error_code=body.get('code')
+                except Exception:
+                    pass
+                if attempt==0 and response.status_code==400 and type(error_code) is int and error_code==-1021:
+                    # Date is obtained from the authenticated HTTPS response,
+                    # has only second precision, and is rounded down. Measuring
+                    # against receive time keeps the retry slightly behind the
+                    # server instead of risking its strict 1s-ahead rejection.
+                    try:
+                        received=self._clock()
+                        server=parsedate_to_datetime(response.headers.get('date',''))
+                        offset=server.timestamp()-received
+                        if server.tzinfo is not None and abs(offset)<=60:
+                            self._signing_offset=offset
+                            self._offset_checked_at=received
+                    except (ValueError,TypeError,OverflowError):
+                        pass
+                    continue
+                raise BinanceReadError('HTTPStatusError',http_status=response.status_code,error_code=error_code) from None
+            try:
+                return response.json()
             except Exception:
-                pass
-            raise BinanceReadError('HTTPStatusError',http_status=response.status_code,error_code=error_code) from None
-        try:
-            return response.json()
-        except Exception:
-            raise BinanceReadError('InvalidJSON',http_status=response.status_code) from None
+                raise BinanceReadError('InvalidJSON',http_status=response.status_code) from None
 
     async def check_read_only(self):
         self._permissions_checked_at=None

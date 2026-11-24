@@ -119,7 +119,7 @@ def test_concurrent_chain_reads_are_bounded_and_bad_receipt_does_not_block_sibli
             timestamp_ms=invoice['created_ms'] + 1), txid)[0]
     class Chain:
         active = maximum = history_calls = receipt_calls = 0
-        async def candidates(self, *args):
+        async def candidates(self, *args, **kwargs):
             self.history_calls += 1
             return list(transfers)
         async def transfers(self, txid):
@@ -153,7 +153,7 @@ def test_known_chain_confirmed_deposit_is_verified_without_indexer(tmp_path):
                                    timestamp_ms=invoice['created_ms'] + 1), txid)[0]
     book.observe(transfer)
     class Chain:
-        async def candidates(self, *args): raise AssertionError('Not needed')
+        async def candidates(self, *args, **kwargs): raise AssertionError('Not needed')
         async def transfers(self, value):
             assert value == txid
             return [transfer]
@@ -187,7 +187,16 @@ def test_ten_orders_have_one_purchase_each_and_visa_pay_calls_are_serialized(tmp
     invoices = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(10)]
     for i, invoice in enumerate(invoices): confirm_synthetic_payment(book, invoice, index=i)
     original_pay = store.pay
-    counts = {'active': 0, 'maximum': 0}
+    original_prepare = store.prepare
+    counts = {'active': 0, 'maximum': 0, 'quota_violations': 0}
+    prepared_order = []
+    async def prepare(invoice):
+        # This models the actual supplier's one-unpaid-license account quota.
+        if any(order.status != 'paid' for order in store.orders.values()):
+            counts['quota_violations'] += 1
+            raise RuntimeError('Only one unpaid supplier order is permitted')
+        prepared_order.append(invoice['id'])
+        return await original_prepare(invoice)
     async def pay(*args):
         counts['active'] += 1
         counts['maximum'] = max(counts['maximum'], counts['active'])
@@ -197,14 +206,161 @@ def test_ten_orders_have_one_purchase_each_and_visa_pay_calls_are_serialized(tmp
         finally:
             counts['active'] -= 1
     store.pay = pay
+    store.prepare = prepare
     async def go():
-        for _ in range(8):
+        for _ in range(40):
             await worker.fulfillment_once()
             await worker.wait_idle()
+            if all(book.get(row['id'])['state'] == 'delivered' for row in invoices): break
     asyncio.run(go())
     assert counts['maximum'] == 1 and store.charges == 10 and len(delivery.files) == 10
+    assert counts['quota_violations'] == 0
+    assert prepared_order == [row['id'] for row in sorted(invoices, key=lambda row: (row['created_ms'], row['id']))]
     assert all(book.get(row['id'])['state'] == 'delivered' for row in invoices)
     assert all(book.get(row['id'])['delivery_ref'] == 'DEMO-TELEGRAM-RECEIPT' for row in invoices)
+    assert all('supplier_slot_reserved' in book.audit(row['id']) and
+               'supplier_slot_released_after_paid' in book.audit(row['id']) for row in invoices)
+
+
+def test_supplier_reservation_is_created_before_scheduling_and_not_a_queue_of_paid_tasks(tmp_path):
+    book, store, _, _, _, worker = simulation(tmp_path)
+    invoices = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(6)]
+    for i, invoice in enumerate(invoices): confirm_synthetic_payment(book, invoice, index=i)
+    oldest = min(invoices, key=lambda row: (row['created_ms'], row['id']))
+    async def go():
+        assert await asyncio.gather(*(worker.fulfillment_once() for _ in range(3))) == [1, 0, 0]
+        with book.connection() as db:
+            assert db.execute("SELECT value FROM metadata WHERE key='supplier_slot_invoice'").fetchone()[0] == oldest['id']
+        assert len(worker._jobs) == 1
+        await worker.wait_idle()
+    asyncio.run(go())
+    assert store.uploads == 1 and book.get(oldest['id'])['state'] == 'prepared'
+    assert sum(book.get(row['id'])['state'] == 'paid' for row in invoices) == 5
+
+
+def test_existing_prepared_order_has_priority_and_releases_slot_only_after_paid(tmp_path):
+    book, store, delivery, engine, watcher, worker = simulation(tmp_path)
+    waiting, prepared = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(2)]
+    for i, invoice in enumerate((waiting, prepared)): confirm_synthetic_payment(book, invoice, index=i)
+    # Ensure the unrelated waiting customer really has the earlier FIFO date.
+    with book.connection() as db:
+        db.execute('UPDATE invoices SET created_ms=created_ms-100 WHERE id=?', (waiting['id'],))
+    async def go():
+        await engine.step(prepared['id'])
+        assert book.get(prepared['id'])['state'] == 'prepared'
+        # No process-local reservation survives; derive it from persisted state.
+        restarted = RuntimeWorker(book, watcher, engine)
+        assert await restarted.fulfillment_once() == 1
+        await restarted.wait_idle()
+        assert book.get(prepared['id'])['state'] == 'download_pending'
+        assert book.get(waiting['id'])['state'] == 'paid' and store.uploads == 1
+        assert await restarted.fulfillment_once() == 2  # paid file + next supplier owner
+        await restarted.wait_idle()
+        assert book.get(waiting['id'])['state'] == 'prepared' and store.uploads == 2
+    asyncio.run(go())
+    assert store.charges == 1
+
+
+def test_unknown_prepare_write_holds_slot_after_restart_and_never_creates_another(tmp_path):
+    book, store, delivery, engine, watcher, worker = simulation(tmp_path)
+    invoices = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(2)]
+    for i, invoice in enumerate(invoices): confirm_synthetic_payment(book, invoice, index=i)
+    original_prepare = store.prepare
+    async def lost_prepare(invoice):
+        await original_prepare(invoice)
+        raise TimeoutError('Lost response after supplier created an unpaid license')
+    store.prepare = lost_prepare
+    async def go():
+        await worker.fulfillment_once()
+        await worker.wait_idle()
+        owner = next(row for row in book.list_by_states(('purchase_review',)))
+        assert owner['supplier_ref'] is None
+        restarted = RuntimeWorker(book, watcher, engine, clock=lambda: 10000)
+        book.recover()
+        for _ in range(10):
+            await restarted.fulfillment_once()
+            await restarted.wait_idle()
+            await restarted.verification_once()
+        with book.connection() as db:
+            assert db.execute("SELECT value FROM metadata WHERE key='supplier_slot_invoice'").fetchone()[0] == owner['id']
+        assert restarted._supplier_slot_state == 'purchase_review'
+    asyncio.run(go())
+    assert store.uploads == 1 and store.charges == 0 and watcher.scans == 10
+    assert len(book.list_by_states(('paid',))) == 1 and not delivery.files
+
+
+def test_authentication_challenge_holds_supplier_slot_but_other_paid_files_and_scans_continue(tmp_path):
+    now = [100.0]
+    book, store, delivery, engine, watcher, worker = simulation(tmp_path, clock=lambda: now[0])
+    pending, ready, queued = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(3)]
+    for i, invoice in enumerate((pending, ready, queued)): confirm_synthetic_payment(book, invoice, index=i)
+    with book.connection() as db:
+        db.execute('UPDATE invoices SET created_ms=created_ms-100 WHERE id=?', (pending['id'],))
+    async def go():
+        for _ in range(3): await engine.step(ready['id'])
+        assert book.get(ready['id'])['state'] == 'ready'
+        store.authentication = True
+        for _ in range(8):
+            now[0] += 301
+            await worker.fulfillment_once()
+            await worker.wait_idle()
+            await worker.verification_once()
+        assert book.get(pending['id'])['state'] == 'action_required'
+        assert book.get(queued['id'])['state'] == 'paid'
+        assert book.get(ready['id'])['state'] == 'delivered'
+        assert worker._supplier_slot_state == 'action_required'
+    asyncio.run(go())
+    assert store.uploads == 2 and store.charges == 2 and watcher.scans == 8
+    assert [invoice_id for invoice_id, _ in delivery.files] == [ready['id']]
+
+
+def test_post_purchase_state_without_payment_proof_blocks_new_supplier_creation(tmp_path):
+    book, store, delivery, engine, _, worker = simulation(tmp_path)
+    corrupt, queued = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(2)]
+    for i, invoice in enumerate((corrupt, queued)): confirm_synthetic_payment(book, invoice, index=i)
+    async def go():
+        for _ in range(3): await engine.step(corrupt['id'])
+        with book.connection() as db:
+            db.execute('UPDATE invoices SET payment_ref=NULL WHERE id=?', (corrupt['id'],))
+        assert await worker.fulfillment_once() == 0
+    asyncio.run(go())
+    assert store.uploads == 1 and not delivery.files and book.get(queued['id'])['state'] == 'paid'
+
+
+def test_lost_supplier_slot_owner_is_not_silently_reassigned(tmp_path):
+    book, store, _, _, _, worker = simulation(tmp_path)
+    invoice = create_synthetic_invoice(book, tmp_path)
+    confirm_synthetic_payment(book, invoice)
+    with book.connection() as db:
+        db.execute("INSERT INTO metadata VALUES('supplier_slot_invoice',?)", ('f' * 32,))
+    assert asyncio.run(worker.fulfillment_once()) == 0
+    assert worker._supplier_slot_state == 'unknown_owner' and store.uploads == 0
+
+
+@pytest.mark.parametrize('interrupted', ['preparing', 'inspecting', 'charging'])
+def test_interrupted_supplier_operation_holds_slot_across_recovery(tmp_path, interrupted):
+    book, store, _, engine, watcher, worker = simulation(tmp_path)
+    owner, queued = [create_synthetic_invoice(book, tmp_path, index=i) for i in range(2)]
+    for i, invoice in enumerate((owner, queued)): confirm_synthetic_payment(book, invoice, index=i)
+    with book.connection() as db:
+        db.execute('UPDATE invoices SET created_ms=created_ms-100 WHERE id=?', (owner['id'],))
+    async def go():
+        if interrupted == 'preparing':
+            book.transition(owner['id'], 'paid', 'preparing')
+        else:
+            await engine.step(owner['id'])
+            book.transition(owner['id'], 'prepared', interrupted)
+        assert await worker.fulfillment_once() == 0
+        book.recover()
+        restarted = RuntimeWorker(book, watcher, engine)
+        await restarted.fulfillment_once()
+        await restarted.wait_idle()
+        assert book.get(owner['id'])['state'] == 'purchase_review'
+        assert book.get(queued['id'])['state'] == 'paid'
+        with book.connection() as db:
+            assert db.execute("SELECT value FROM metadata WHERE key='supplier_slot_invoice'").fetchone()[0] == owner['id']
+    asyncio.run(go())
+    assert store.uploads == (0 if interrupted == 'preparing' else 1) and store.charges == 0
 
 
 def test_ready_delivery_and_verification_continue_while_another_purchase_waits(tmp_path):

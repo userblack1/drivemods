@@ -22,6 +22,9 @@ from .watcher import Watcher
 WORK_STATES = ('paid', 'prepared', 'waiting_supplier', 'action_required',
                'purchase_review', 'download_pending', 'ready')
 CARD_STATES = {'paid', 'prepared', 'waiting_supplier', 'action_required', 'purchase_review'}
+SUPPLIER_HOLD_STATES = {'preparing', 'prepared', 'inspecting', 'charging',
+                        'waiting_supplier', 'action_required', 'purchase_review'}
+SUPPLIER_PAID_STATES = {'download_pending', 'downloading', 'ready', 'sending', 'delivered'}
 
 
 @dataclass(frozen=True)
@@ -111,8 +114,8 @@ class RateLimitedExchange:
 class ConcurrentWatcher(Watcher):
     """Independent bounded RPC jobs; one failing invoice cannot block siblings."""
 
-    def __init__(self, ledger, tron, exchange=None, *, concurrency=4):
-        super().__init__(ledger, tron, exchange)
+    def __init__(self, ledger, tron, exchange=None, *, concurrency=4, clock=time.time, windows_per_cycle=4):
+        super().__init__(ledger, tron, exchange,clock=clock,windows_per_cycle=windows_per_cycle)
         if type(concurrency) is not int or not 1 <= concurrency <= 32:
             raise ValueError('Invalid verification concurrency')
         if exchange is not None and not isinstance(exchange, RateLimitedExchange):
@@ -121,52 +124,7 @@ class ConcurrentWatcher(Watcher):
         self._scan_lock = asyncio.Lock()
 
     async def scan(self):
-        async with self._scan_lock:
-            rows = self.ledger.list_by_states(('awaiting_payment', 'chain_confirmed'), limit=1000)
-            self.last_errors = []
-            histories, work = {}, set()
-            for row in rows:
-                if row['state'] == 'chain_confirmed' and row['txid']:
-                    work.add((row['txid'], row['address']))
-                elif row['state'] == 'awaiting_payment':
-                    address = row['address']
-                    histories[address] = min(histories.get(address, row['created_ms']), row['created_ms'])
-
-            async def history(address, since):
-                try:
-                    async with self._rpc_slots:
-                        ids = await self.tron.candidates(address, since)
-                    work.update((txid, address) for txid in ids)
-                except Exception as exc:
-                    self._deferred('history', exc)
-            await asyncio.gather(*(history(address, since) for address, since in histories.items()))
-            addresses_by_tx = {}
-            for txid, address in work:
-                addresses_by_tx.setdefault(txid, set()).add(address)
-
-            async def receipt(txid, addresses):
-                try:
-                    async with self._rpc_slots:
-                        transfers = await self.tron.transfers(txid)
-                except Exception as exc:
-                    self._deferred('receipt', exc)
-                    return
-                for transfer in transfers:
-                    if transfer.address not in addresses:
-                        continue
-                    try:
-                        self.ledger.observe(transfer)
-                        with self.ledger.connection() as db:
-                            target = db.execute('SELECT id,state FROM invoices WHERE txid=? AND log_index=?',
-                                                (transfer.txid, transfer.log_index)).fetchone()
-                        if target and target['state'] == 'chain_confirmed' and self.exchange:
-                            credit = await self.exchange.credit(transfer)
-                            if credit:
-                                self.ledger.confirm_exchange(target['id'], credit)
-                    except Exception as exc:
-                        self._deferred('deposit', exc)
-            await asyncio.gather(*(receipt(txid, addresses) for txid, addresses in addresses_by_tx.items()))
-            return len(work)
+        return await super().scan()
 
 
 class _TokenLogFilter(logging.Filter):
@@ -274,6 +232,7 @@ class RuntimeWorker:
         self._visa_lock, self._delivery_slots = asyncio.Lock(), asyncio.Semaphore(delivery_concurrency)
         self._jobs, self._retry_at, self._failures = {}, {}, {}
         self._payment_ok, self._payment_error, self._work_error = None, None, None
+        self._supplier_slot_state, self._supplier_queued = 'unreserved', 0
         self.started = asyncio.Event()
 
     def readiness(self):
@@ -288,6 +247,8 @@ class RuntimeWorker:
                   'mode': 'simulation' if self.ledger.simulation else 'live',
                   'payment_scan_ok': self._payment_ok, 'payment_error_type': self._payment_error,
                   'worker_error_type': self._work_error, 'active_jobs': len(self._jobs),
+                  'supplier_slot_state': self._supplier_slot_state,
+                  'supplier_orders_queued': self._supplier_queued,
                   'live_purchase_enabled': bool(self.engine.live_purchase_enabled),
                   'automatic_purchase_ready': self.readiness().ready,
                   'readiness_missing': list(self.readiness().missing)}
@@ -334,9 +295,58 @@ class RuntimeWorker:
             self._work_error = type(exc).__name__
             logging.getLogger(__name__).warning('License worker job deferred: %s', type(exc).__name__)
 
+    @staticmethod
+    def _supplier_paid(row):
+        reference = row.get('payment_ref')
+        return (row['state'] in SUPPLIER_PAID_STATES and isinstance(reference, str)
+                and bool(reference.strip()) and reference == reference.strip())
+
+    def _supplier_selection(self):
+        """Keep the store's one-unpaid-order slot across steps and restarts.
+
+        An asyncio lock around prepare/pay individually is insufficient: another
+        customer could create an unpaid order between those two steps. Reserve
+        ownership durably before scheduling any potentially external write.
+        """
+        with self.ledger.connection() as db:
+            rows = [dict(row) for row in db.execute('SELECT * FROM invoices ORDER BY created_ms,id')]
+            by_id = {row['id']: row for row in rows}
+            reservation = db.execute("SELECT value FROM metadata WHERE key='supplier_slot_invoice'").fetchone()
+            owner_id = reservation[0] if reservation else None
+            owner = by_id.get(owner_id)
+            if owner_id and owner and self._supplier_paid(owner):
+                db.execute("DELETE FROM metadata WHERE key='supplier_slot_invoice'")
+                db.execute('INSERT INTO audit(invoice_id,event,at_ms) VALUES(?,?,?)',
+                           (owner_id, 'supplier_slot_released_after_paid', int(time.time() * 1000)))
+                owner_id = owner = None
+            if owner_id is None:
+                # A pre-existing unfinished operation takes precedence over any
+                # unstarted paid invoice, even if the latter was created first.
+                unresolved = [row for row in rows if row['state'] in SUPPLIER_HOLD_STATES
+                              or row['state'] in SUPPLIER_PAID_STATES and not self._supplier_paid(row)]
+                candidates = unresolved or [row for row in rows if row['state'] == 'paid']
+                if candidates:
+                    owner = candidates[0]
+                    owner_id = owner['id']
+                    db.execute("INSERT INTO metadata(key,value) VALUES('supplier_slot_invoice',?)", (owner_id,))
+                    db.execute('INSERT INTO audit(invoice_id,event,at_ms) VALUES(?,?,?)',
+                               (owner_id, 'supplier_slot_reserved', int(time.time() * 1000)))
+            known_states = set(WORK_STATES) | SUPPLIER_HOLD_STATES | SUPPLIER_PAID_STATES
+            self._supplier_slot_state = ((owner['state'] if owner['state'] in known_states else 'unknown_state')
+                                         if owner else ('unknown_owner' if owner_id else 'unreserved'))
+            self._supplier_queued = sum(row['id'] != owner_id and (row['state'] == 'paid'
+                                        or row['state'] in SUPPLIER_HOLD_STATES) for row in rows)
+            selected = []
+            if owner and owner['state'] in CARD_STATES:
+                selected.append(owner)
+            # Verified paid downloads/deliveries never consume an unpaid slot.
+            selected.extend(row for row in rows if row['state'] in {'download_pending', 'ready'}
+                            and self._supplier_paid(row))
+            return selected
+
     async def fulfillment_once(self):
         started = 0
-        for row in self.ledger.list_by_states(WORK_STATES, limit=1000):
+        for row in self._supplier_selection():
             invoice_id = row['id']
             if invoice_id in self._jobs or self._retry_at.get(invoice_id, 0) > self.clock():
                 continue

@@ -15,7 +15,8 @@ from crypto_checkout.fulfillment import Engine
 from crypto_checkout.ledger import Ledger
 from crypto_checkout.drivemods import LicenseExpectation
 from crypto_checkout.store_adapter import (
-    DriveModsPurchaseClient, DriveModsStoreAdapter, PurchaseReviewRequired, StoreJournal,
+    CreationReplyContract, DriveModsPurchaseClient, DriveModsStoreAdapter,
+    PurchaseReviewRequired, StoreJournal,
 )
 from crypto_checkout.tron import parse_solid_receipt
 
@@ -31,6 +32,8 @@ class PublicContractShop:
         self.price = 90
         self.recoverable = False
         self.checkout_fields = True
+        self.extra_prices = []
+        self.before_create = None
 
     def owner(self):
         return {"__type": "Pointer", "className": "_User", "objectId": OWNER}
@@ -67,6 +70,7 @@ class PublicContractShop:
                                    "name": "IG19.KOR.SOP", "spec": "FULL", "region": None}},
                       {"isActive": True, "price": 60,
                        "product": {"name": "IG19.KOR.SOP", "spec": "ECO", "region": None}}]
+            result.extend(self.extra_prices)
         elif name == "processQuery":
             if body["type"] == "GET_ONE":
                 result = {"data": self.rows[body["params"]["id"]]}
@@ -77,6 +81,8 @@ class PublicContractShop:
                 rows = [r for r in self.rows.values() if r["type"] == filters["type_num"]]
                 result = {"data": rows, "total": len(rows)}
         elif name == "createNewLicense":
+            if self.before_create is not None:
+                self.before_create(body)
             self.creates["license"] += 1
             if self.loss == "before_license":
                 raise httpx.ReadTimeout("fixture-password-must-not-leak")
@@ -373,3 +379,60 @@ def test_engine_runs_actual_adapter_contract_once_through_delivery_using_only_mo
             assert delivery.sent == 1 and executor.calls == 1
             assert shop.creates == {"license": 1, "payment": 1, "checkout": 1}
     asyncio.run(run())
+
+
+def test_catalog_preflight_needs_no_device_and_does_not_equate_other_specs_or_prices(tmp_path):
+    async def run():
+        adapter, shop, _ = await setup_adapter(tmp_path, verify_binding=False)
+        shop.extra_prices = [
+            {"isActive": True, "price": 60, "product": {"name": "LG-GEN5", "spec": "CUSTOM+RUS", "region": None}},
+            {"isActive": True, "price": 175, "product": {"name": "HM-GEN5W", "spec": "FULL", "region": None}},
+        ]
+        async with adapter.client:
+            offers = await adapter.client.preflight_catalog()
+            assert [(o.bundle, o.cost_cents) for o in offers] == [("FULL", 9000), ("ECO", 6000)]
+            assert not any(name in {"licenseGetInfo", "createNewLicense", "createPayment"} for name, _ in shop.calls)
+            assert adapter.merchant_device_binding_verified is False
+    asyncio.run(run())
+
+
+def test_creation_rid_source_hash_and_own_id_baseline_are_committed_before_network_write(tmp_path):
+    async def run():
+        adapter, shop, invoice = await setup_adapter(tmp_path)
+        checked = []
+
+        def before_write(body):
+            row = adapter.journal.get("DMCO-" + invoice["id"])
+            proof = row["request_proof"]
+            assert row["phase"] == "license_creating"
+            assert proof["rid"] == body["rid"] == row["binding"]["license_rid"]
+            assert proof["source_sha256"] == invoice["source_sha"]
+            assert proof["owner_id"] == OWNER and proof["baseline_ids"] == ["ProofLic01"]
+            assert "License001" not in proof["baseline_ids"]
+            checked.append(True)
+
+        shop.before_create = before_write
+        async with adapter.client:
+            await adapter.prepare(invoice)
+            assert checked == [True]
+    asyncio.run(run())
+
+
+def test_creation_reply_contract_has_no_guessed_default_and_candidate_never_activates_capabilities():
+    with pytest.raises(TypeError):
+        CreationReplyContract()
+    with pytest.raises(ValueError):
+        CreationReplyContract(())
+    contract = CreationReplyContract(("new_record", "id"))  # Synthetic contract, not an asserted vendor path.
+    context = dict(request_id="RQ-fixture", source=b"fixture-device-id", owner_id=OWNER,
+                   baseline_ids=frozenset({"OldRecord1"}))
+    with pytest.raises(PurchaseReviewRequired):
+        contract.parse({"e": ""}, **context)  # Actual public caller consumes only e; no ID can be inferred.
+    candidate = contract.parse({"e": "", "new_record": {"id": "NewRecord1"}}, **context)
+    assert candidate.record_id == "NewRecord1"
+    assert candidate.source_sha256 == hashlib.sha256(context["source"]).hexdigest()
+    assert not hasattr(candidate, "merchant_device_binding_verified")
+    with pytest.raises(PurchaseReviewRequired):
+        contract.parse({"e": "", "new_record": {"id": "OldRecord1"}}, **context)
+    with pytest.raises(PurchaseReviewRequired):
+        contract.parse({"e": "", "new_record": {"id": True}}, **context)

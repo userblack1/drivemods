@@ -117,7 +117,7 @@ def test_chain_confirmed_payment_is_retried_without_indexer_history(tmp_path):
     transfer=transfer_for(row)
     book.observe(transfer)
     class Chain:
-        async def candidates(self,*args):raise AssertionError('Known deposit must not depend on history')
+        async def candidates(self,*args,**kwargs):raise AssertionError('Known deposit must not depend on history')
         async def transfers(self,txid):return [transfer]
     class Exchange:
         async def credit(self,value):
@@ -137,7 +137,7 @@ def test_shared_address_is_scanned_once_and_one_exchange_failure_does_not_block_
         transfers[transfer.txid]=transfer
     scans=[]
     class Chain:
-        async def candidates(self,address,since):
+        async def candidates(self,address,since,**kwargs):
             scans.append((address,since))
             return list(transfers)
         async def transfers(self,txid):return [transfers[txid]]
@@ -165,7 +165,7 @@ def test_one_address_history_failure_does_not_block_another_address(tmp_path):
     rows=[create_synthetic_invoice(book,tmp_path,i,shared=False) for i in range(2)]
     transfer=transfer_for(rows[1])
     class Chain:
-        async def candidates(self,address,since):
+        async def candidates(self,address,since,**kwargs):
             if address==rows[0]['address']:raise OSError('offline')
             return [transfer.txid]
         async def transfers(self,txid):return [transfer]

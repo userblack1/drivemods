@@ -35,6 +35,69 @@ class PurchaseReviewRequired(DriveModsError):
 
 
 @dataclass(frozen=True)
+class CatalogOffer:
+    product: str
+    bundle: str
+    region: str | None
+    cost_cents: int
+
+
+@dataclass(frozen=True)
+class CreationReplyCandidate:
+    """Correlation evidence only; NOT paid/device proof or a readiness flag."""
+
+    record_id: str
+    request_id: str
+    source_sha256: str
+    owner_id: str
+    baseline_sha256: str
+    reply_sha256: str
+
+
+@dataclass(frozen=True)
+class CreationReplyContract:
+    """Explicit future-observed JSON path. No real default path is known.
+
+    Public DriveMods code consumes only result.e. This parser therefore cannot
+    infer an ID field, enable a capability or substitute an old matching record.
+    A candidate still requires authenticated response provenance and GET_ONE
+    ownership/new-record/device checks in a verified integration.
+    """
+
+    record_id_path: tuple[str, ...]
+
+    def __post_init__(self):
+        if (not isinstance(self.record_id_path, tuple) or not 1 <= len(self.record_id_path) <= 8
+                or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", key)
+                       for key in self.record_id_path)):
+            raise ValueError("An explicit observed creation-reply path is required")
+
+    def parse(self, reply, *, request_id: str, source: bytes, owner_id: str,
+              baseline_ids: frozenset[str]) -> CreationReplyCandidate:
+        if (not isinstance(reply, dict) or reply.get("e") not in (None, "") or "error" in reply
+                or not _valid_id(request_id) or not request_id.startswith("RQ-")
+                or not isinstance(source, bytes) or not source or len(source) > 16 * 1024 * 1024
+                or not _valid_id(owner_id) or not isinstance(baseline_ids, frozenset)
+                or len(baseline_ids) > 10000 or not all(_valid_id(x) for x in baseline_ids)):
+            raise PurchaseReviewRequired("Creation reply correlation context is not verified")
+        value = reply
+        for key in self.record_id_path:
+            if not isinstance(value, dict) or key not in value:
+                raise PurchaseReviewRequired("Creation reply does not match its observed contract")
+            value = value[key]
+        if not _valid_id(value) or value in baseline_ids:
+            raise PurchaseReviewRequired("Creation reply did not identify a new record")
+        try:
+            # Fingerprints contain no raw reply, license or session credentials.
+            encoded = json.dumps(reply, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        except (ValueError, TypeError):
+            raise PurchaseReviewRequired("Creation reply shape is not verified") from None
+        baseline = json.dumps(sorted(baseline_ids), separators=(",", ":")).encode()
+        return CreationReplyCandidate(value, request_id, hashlib.sha256(source).hexdigest(), owner_id,
+                                      hashlib.sha256(baseline).hexdigest(), hashlib.sha256(encoded).hexdigest())
+
+
+@dataclass(frozen=True)
 class DeviceOffer:
     product: str
     bundle: str
@@ -90,6 +153,38 @@ class DriveModsPurchaseClient(DriveModsParseClient):
         super().__init__(**kwargs)
         self.allow_creates = allow_creates is True
         self._binding_proof_owner_id: str | None = None
+
+    async def preflight_catalog(self) -> tuple[CatalogOffer, ...]:
+        """Read supported own prices without uploading or requiring a Device ID."""
+        group = await self._cloud("getUserPriceGroup", {})
+        items = await self._cloud("getUserPriceItems", {})
+        if not isinstance(group, dict) or type(group.get("currency")) is not int or group["currency"] != 2:
+            raise PurchaseReviewRequired("Supplier price is not in USD")
+        if not isinstance(items, list):
+            raise DriveModsVerificationError("Unknown supplier price list")
+        offers, seen = [], set()
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("product"), dict):
+                raise DriveModsVerificationError("Unknown supplier price item")
+            if item.get("isActive") is not True:
+                continue
+            product = item["product"]
+            name, spec, region = product.get("name"), product.get("spec"), product.get("region")
+            if not _text(name) or not _text(spec) or region is not None and not _text(region):
+                raise DriveModsVerificationError("Unknown supplier product classification")
+            if spec.casefold() not in _PRICES:
+                continue  # CUSTOM+RUS is not automatically ECO just because it costs $60.
+            price = _cents(item.get("price"))
+            if price != _PRICES[spec.casefold()]:
+                continue  # e.g. FULL $175 is not authorized by the FULL $90 cap.
+            key = (name, spec, region)
+            if key in seen:
+                raise PurchaseReviewRequired("Supplier price selection is ambiguous")
+            seen.add(key)
+            offers.append(CatalogOffer(name, spec, region, price))
+        if not offers:
+            raise PurchaseReviewRequired("No supported FULL or ECO supplier prices are available")
+        return tuple(offers)
 
     @property
     def merchant_device_binding_verified(self) -> bool:
@@ -176,9 +271,9 @@ class DriveModsPurchaseClient(DriveModsParseClient):
         return DeviceOffer(info["product"], choices[0], selected_region, info["device_id"],
                            info["version_software"], custom, _PRICES[plan])
 
-    async def find_marker(self, marker: str, record_type: int) -> list[str]:
+    async def find_marker(self, marker: str | None, record_type: int) -> list[str]:
         """Read own pages, matching exact marker locally; do not trust text search."""
-        if not self.identity or record_type not in (2, 4) or not _text(marker):
+        if not self.identity or record_type not in (2, 4) or marker is not None and not _text(marker):
             raise DriveModsVerificationError("Invalid reconciliation request")
         found, seen, expected_total = [], set(), None
         for page in range(1, 101):
@@ -202,7 +297,7 @@ class DriveModsPurchaseClient(DriveModsParseClient):
                         or type(row.get("type")) is not int or row["type"] != record_type):
                     raise PurchaseReviewRequired("Store reconciliation identities are inconsistent")
                 seen.add(record_id)
-                if row.get("dealerComment") == marker:
+                if marker is None or row.get("dealerComment") == marker:
                     found.append(record_id)
             if len(seen) == expected_total:
                 return found
@@ -210,7 +305,8 @@ class DriveModsPurchaseClient(DriveModsParseClient):
                 raise PurchaseReviewRequired("Store reconciliation pages are incomplete")
         raise PurchaseReviewRequired("Too many records for safe reconciliation")
 
-    async def create_license(self, source: bytes, offer: DeviceOffer, marker: str) -> None:
+    async def create_license(self, source: bytes, offer: DeviceOffer, marker: str,
+                             *, request_id: str | None = None):
         if (not self.identity or not isinstance(offer, DeviceOffer) or not _text(marker)
                 or not isinstance(source, bytes) or not source or len(source) > self.max_license_bytes
                 or not _text(offer.product) or not _text(offer.device_id) or not _text(offer.version)
@@ -219,8 +315,11 @@ class DriveModsPurchaseClient(DriveModsParseClient):
                 or offer.bundle.casefold() not in _PRICES
                 or offer.cost_cents != _PRICES[offer.bundle.casefold()]):
             raise DriveModsVerificationError("Invalid license creation binding")
-        await self._cloud("createNewLicense", {
-            "rid": "RQ-" + str(uuid4()), "uid": self.identity.username,
+        request_id = request_id or "RQ-" + str(uuid4())
+        if not _valid_id(request_id) or not request_id.startswith("RQ-"):
+            raise DriveModsVerificationError("Invalid license request identity")
+        return await self._cloud("createNewLicense", {
+            "rid": request_id, "uid": self.identity.username,
             "did": base64.urlsafe_b64encode(source).decode("ascii"), "op": "GENERATE",
             "prod": offer.product, "bndl": offer.bundle, "region": offer.region, "opts": "",
             "operationId": 1, "version": offer.version, "versionCustom": offer.version_custom,
@@ -288,7 +387,9 @@ class StoreJournal:
             db.execute("""CREATE TABLE IF NOT EXISTS store_orders(
                 reference TEXT PRIMARY KEY, binding TEXT NOT NULL, phase TEXT NOT NULL,
                 license_id TEXT NOT NULL DEFAULT '',payment_id TEXT NOT NULL DEFAULT '',
-                output_sha TEXT NOT NULL DEFAULT '')""")
+                output_sha TEXT NOT NULL DEFAULT '',request_proof TEXT NOT NULL DEFAULT '')""")
+            if "request_proof" not in {row["name"] for row in db.execute("PRAGMA table_info(store_orders)")}:
+                db.execute("ALTER TABLE store_orders ADD COLUMN request_proof TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _db(self):
@@ -307,7 +408,8 @@ class StoreJournal:
     def get(self, reference: str):
         with self._db() as db:
             row = db.execute("SELECT * FROM store_orders WHERE reference=?", (reference,)).fetchone()
-            return {**dict(row), "binding": json.loads(row["binding"])} if row else None
+            return {**dict(row), "binding": json.loads(row["binding"]),
+                    "request_proof": json.loads(row["request_proof"]) if row["request_proof"] else None} if row else None
 
     def reserve(self, reference: str, binding: dict):
         text = json.dumps(binding, sort_keys=True, separators=(",", ":"))
@@ -318,7 +420,7 @@ class StoreJournal:
             db.execute("INSERT OR IGNORE INTO store_orders(reference,binding,phase) VALUES(?,?,'reserved')", (reference, text))
 
     def move(self, reference: str, old: str, new: str, **values):
-        if not set(values) <= {"license_id", "payment_id", "output_sha"}:
+        if not set(values) <= {"license_id", "payment_id", "output_sha", "request_proof"}:
             raise ValueError("Invalid journal field")
         with self._db() as db:
             assignments = ",".join(["phase=?"] + [key + "=?" for key in values])
@@ -434,7 +536,8 @@ class DriveModsStoreAdapter:
             source = self._source(confirmed)
             offer = await self.client.quote_device(source, confirmed["plan"], region=self.region)
             binding = {k: confirmed[k] for k in ("id", "plan", "source_path", "source_sha", "cost_cents", "txid", "exchange_deposit")}
-            binding.update(owner_id=self.client.identity.user_id, marker="crypto-order:" + confirmed["id"], offer=asdict(offer))
+            binding.update(owner_id=self.client.identity.user_id, marker="crypto-order:" + confirmed["id"],
+                           offer=asdict(offer), license_rid="RQ-" + str(uuid4()))
             self.journal.reserve(reference, binding)
         row = self._bound(reference)
         binding = row["binding"]
@@ -442,10 +545,20 @@ class DriveModsStoreAdapter:
             operation_phase = row["phase"]
             license_record = await self._locate(binding, 2)
             if license_record is None and row["phase"] == "reserved":
-                self.journal.move(reference, "reserved", "license_creating")
+                baseline = frozenset(await self.client.find_marker(None, 2))
+                request_id = binding.get("license_rid")
+                if not _valid_id(request_id) or not request_id.startswith("RQ-"):
+                    raise PurchaseReviewRequired("Creation request was not journaled")
+                baseline_text = json.dumps(sorted(baseline), separators=(",", ":"))
+                request_proof = {"rid": request_id, "source_sha256": binding["source_sha"],
+                                 "owner_id": binding["owner_id"], "baseline_ids": sorted(baseline),
+                                 "baseline_sha256": hashlib.sha256(baseline_text.encode()).hexdigest()}
+                self.journal.move(reference, "reserved", "license_creating",
+                                  request_proof=json.dumps(request_proof, sort_keys=True, separators=(",", ":")))
                 operation_phase = "license_creating"
                 self._bound(reference)
-                await self.client.create_license(self._source(binding), DeviceOffer(**binding["offer"]), binding["marker"])
+                await self.client.create_license(self._source(binding), DeviceOffer(**binding["offer"]), binding["marker"],
+                                                  request_id=request_id)
                 license_record = await self._locate(binding, 2)
             if license_record is None:
                 raise PurchaseReviewRequired("License creation is uncertain; automatic retry is forbidden")
