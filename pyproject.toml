@@ -16,9 +16,10 @@ firmware = ["telethon>=1.45,<2"]
 [project.scripts]
 drivemods-bot = "drivemods_bot.__main__:main"
 nextmode-sw = "firmware_bot.__main__:main"
+drivemods-crypto-check = "crypto_checkout.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["drivemods_bot*", "firmware_bot*"]
+include = ["drivemods_bot*", "firmware_bot*", "crypto_checkout*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
