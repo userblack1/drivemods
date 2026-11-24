@@ -1,0 +1,206 @@
+{
+  "audit_date": "2026-11-24",
+  "source_repository": "https://github.com/userblack1/drivemods",
+  "source_ref": "caa30c2f2f4e6145ac5b41f12919eb286acb1f3f",
+  "original_bot_username": "NextModLicenseBot",
+  "original_bot_id": 9227738530,
+  "new_bot_username": "DriveMods_licensebot",
+  "new_username_availability": "not_verified; BotFather must confirm",
+  "canonicalization": "UTF-8-sig decode, replace CRLF with LF, encode UTF-8",
+  "core_files": [
+    {
+      "path": "drivemods_bot/__init__.py",
+      "canonical_sha256": "18f37366628b06dd846a04ca837e60990a0055f3a52b2c64267224f01ba18eae",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/__main__.py",
+      "canonical_sha256": "f8f4eac9751ee5638f145e22ba97bf3b93d5286c4453d6edcbdd371f9ed2c3fd",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/api.py",
+      "canonical_sha256": "e31fc85cbc2c6adfed3ff13e8923d976fffc5c858a4d9793ca79019886d47176",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/bank_qr.py",
+      "canonical_sha256": "570967c77b5cf467fed496f292571bf7b073a2a2385e34c89f7d7c8085295408",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/config.py",
+      "canonical_sha256": "56ab09411d30b361401bcebe607345041a3bb7d292ffa43c83f55ad6555f58b0",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/field_order.py",
+      "canonical_sha256": "1301a0ab0190f08255a6da682d00611aec537741f05bea82b12fb71baaad6fdb",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/locking.py",
+      "canonical_sha256": "6c2ac83779388de6a97a4837786827904faf5fa718189843066ddbd34c86b1c6",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/models.py",
+      "canonical_sha256": "b10e77396224c19c89a0d516b76a83f0c97a2312ae1d3286cb9cf75c6c8e73d9",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/operator_orders.py",
+      "canonical_sha256": "40c33c1524d26843468cbfb9a99d32f4d5eaf14c80a31ecc0f6af713b2339d17",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/operator_ui.py",
+      "canonical_sha256": "3b6f808ef8bb854e2d245ce52b9f09272c43f69bf72dd01e787fee8ccd4ad565",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/payment_setup.py",
+      "canonical_sha256": "38778bbd96d7b8541725c4e594d263136fda503b6f065f3d760524aa800e3a3d",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/purchase_policy.py",
+      "canonical_sha256": "2a349a93e9863b7f1a6d1bc86c6bc277ee2d7579d3ee58b257a4fd8b3ca84030",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/readiness.py",
+      "canonical_sha256": "13d98f66d16efb58dcadc64821a8a85daad5e7d400484781fb05e09bcf73f2d0",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/server_demo.py",
+      "canonical_sha256": "d826611791fcd47f5fa56ddda8757d7df005b55d0c6902c79f0d96056fd79884",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/server_operator.py",
+      "canonical_sha256": "8b41ad5b1abb794930008e79f6f1b5eceeb20fbb3daf246e063f584cbef39190",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/service.py",
+      "canonical_sha256": "402081d7fddd99ed6450a9eb4b46a0f33c21bd3c9769d2a740a60368493522b3",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/storage.py",
+      "canonical_sha256": "c182d42b0de2dce6561de2dbf2042d5678a5fcca9b9bdc7b853cd9511a2ff329",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/supplier.py",
+      "canonical_sha256": "7fda5ffaaaac5764088e0cc93736e56c6fd5317dbd6d164ff89a9bac546e274a",
+      "server_byte_match_verified": true
+    },
+    {
+      "path": "drivemods_bot/telegram.py",
+      "canonical_sha256": "3cbfe269d4263f1733b76510c62a3d14ec10bab4788a0ff461bac68b120d5d64",
+      "server_byte_match_verified": true
+    }
+  ],
+  "runtime": {
+    "service": "nextmod-license-bot.service",
+    "app_dir": "/opt/nextmod-license-bot",
+    "data_dir": "/var/lib/nextmod-license-bot",
+    "env_file": "/etc/nextmod-license-bot.env",
+    "entrypoint": "python -m drivemods_bot.server_operator",
+    "settings_nonsecret": {
+      "APP_MODE": "operator",
+      "BOT_NAME": "DriveMods LICENCE",
+      "BOT_INSTANCE_LABEL": "Сервер VDSka",
+      "DATA_DIR": "/var/lib/nextmod-license-bot",
+      "FULL_COST_USD": "90.00",
+      "ECO_COST_USD": "60.00",
+      "MARKUP_USD": "10.00",
+      "FULL_PRICE_STARS": null,
+      "ECO_PRICE_STARS": null,
+      "STORE_UPLOADS_ENABLED": "false",
+      "STORE_PURCHASES_ENABLED": "false",
+      "REQUIRE_USD_NET_CREDIT": "true",
+      "RECEIVING_BANK": "MBANK",
+      "MBANK_QR_ENABLED": "true",
+      "MBANK_QR_FULL_KGS": "9000.00",
+      "MBANK_QR_ECO_KGS": "6500.00",
+      "MBANK_QR_KGS_PER_USD": "",
+      "MAX_UPLOAD_BYTES": null,
+      "MAX_LICENSE_BYTES": null,
+      "QUOTE_TTL_SECONDS": null
+    },
+    "admin_count": 1,
+    "support_configured": true,
+    "qr_source_exists": true
+  },
+  "telegram_public_profile": {
+    "getMe": {
+      "id": 9227738530,
+      "is_bot": true,
+      "first_name": "DriveMods License",
+      "username": "NextModLicenseBot",
+      "active_usernames": [
+        "NextModLicenseBot"
+      ],
+      "can_join_groups": true,
+      "can_read_all_group_messages": false,
+      "supports_inline_queries": false,
+      "needs_inline_query_location": false,
+      "supports_guest_queries": false,
+      "can_connect_to_business": false,
+      "has_main_web_app": false,
+      "has_topics_enabled": false,
+      "has_topic_sidebar": false,
+      "allows_users_to_create_topics": false,
+      "can_manage_bots": false,
+      "supports_join_request_queries": false
+    },
+    "getMyCommands": [
+      {
+        "command": "start",
+        "description": "Заказать лицензию"
+      },
+      {
+        "command": "orders",
+        "description": "Мои заказы"
+      },
+      {
+        "command": "support",
+        "description": "Поддержка"
+      },
+      {
+        "command": "paysupport",
+        "description": "Помощь с оплатой"
+      },
+      {
+        "command": "paymentinfo",
+        "description": "Способы оплаты и цены"
+      },
+      {
+        "command": "terms",
+        "description": "Условия покупки"
+      },
+      {
+        "command": "myid",
+        "description": "Мой Telegram ID"
+      }
+    ],
+    "getMyDescription": {
+      "description": "NextMod License Bot. Тестовый режим: тарифы FULL и ECO. Загрузка ID в DriveMods и настоящие оплаты отключены."
+    },
+    "getMyShortDescription": {
+      "short_description": "NextMod License Bot — лицензии FULL / ECO. Сейчас тестовый режим без оплат."
+    },
+    "getChatMenuButton": {
+      "type": "commands"
+    },
+    "getWebhookInfo": {
+      "webhook_present": false,
+      "pending_update_count": 0
+    }
+  },
+  "profile_warning": "Descriptions mention demo, but verified service mode is operator. Descriptions are stale."
+}
