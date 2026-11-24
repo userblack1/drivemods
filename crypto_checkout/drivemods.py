@@ -43,6 +43,15 @@ class ParseIdentity:
     username: str = field(repr=False)
 
 
+@dataclass(frozen=True, repr=False)
+class ParseSession:
+    """Explicit caller-owned credential export; protect it like a password."""
+
+    username: str
+    user_id: str
+    session_token: str
+
+
 @dataclass(frozen=True)
 class OwnedRecord:
     record_id: str
@@ -191,6 +200,27 @@ class DriveModsParseClient:
     def identity(self) -> ParseIdentity | None:
         return self._identity
 
+    def export_session(self) -> ParseSession:
+        if not self._identity or not self._session_token:
+            raise DriveModsError("DriveMods login is required")
+        return ParseSession(self._identity.username, self._identity.user_id, self._session_token)
+
+    async def resume_session(self, session_token: str, user_id: str, username: str) -> ParseIdentity:
+        """Verify only explicitly supplied credentials, never a browser session."""
+        self._identity, self._session_token = None, None
+        if (not _valid_id(user_id) or not _text(username) or not isinstance(session_token, str)
+                or not 1 <= len(session_token) <= 4096 or any(ord(c) < 32 for c in session_token)):
+            raise DriveModsError("Invalid saved DriveMods session")
+        self._identity, self._session_token = ParseIdentity(user_id, username), session_token
+        try:
+            result = await self._request("users/me", {"_method": "GET"}, authenticated=True)
+            if _object_id(result, class_name="_User") != user_id or result.get("username") != username:
+                raise DriveModsError("Saved DriveMods session identity does not match")
+        except Exception:
+            self._identity, self._session_token = None, None
+            raise DriveModsError("Saved DriveMods session could not be verified") from None
+        return self._identity
+
     async def __aenter__(self) -> DriveModsParseClient:
         return self
 
@@ -204,8 +234,10 @@ class DriveModsParseClient:
 
     async def _request(self, path: str, payload: dict, *, authenticated: bool) -> dict:
         # A typo/new caller cannot turn this reader into a mutating Cloud client.
-        if path not in {"login", "functions/processQuery"}:
+        if path not in {"login", "users/me", "functions/processQuery"}:
             raise DriveModsError("This client does not support store mutations")
+        if path == "users/me" and (not authenticated or payload != {"_method": "GET"}):
+            raise DriveModsError("This client only reads the authenticated session identity")
         if path == "login" and (authenticated or set(payload) != {"username", "password", "_method"}
                                 or payload.get("_method") != "GET"):
             raise DriveModsError("Unsupported login request")
@@ -216,6 +248,10 @@ class DriveModsParseClient:
                 or set(payload["params"]) != {"id"} or not _valid_id(payload["params"]["id"])
                 or payload.get("appVersion") != APP_VERSION):
             raise DriveModsError("This client only reads individual store records")
+        return await self._send_request(path, payload, authenticated=authenticated)
+
+    async def _send_request(self, path: str, payload: dict, *, authenticated: bool) -> dict:
+        """Shared transport; concrete clients must validate their own allowlist."""
         if authenticated and (not self._identity or not self._session_token):
             raise DriveModsError("DriveMods login is required")
         body = {**payload, "_ApplicationId": APP_ID, "_InstallationId": self._installation_id}
@@ -276,10 +312,12 @@ class DriveModsParseClient:
         if type(raw.get("isActive")) is not bool:
             raise DriveModsVerificationError("Invalid active record status")
         details = {}
-        for name in ("product", "bundle", "region", "deviceId", "version", "versionCustom",
+        for name in ("product", "bundle", "region", "deviceId", "version", "versionCustom", "createdAt",
                      "licenseType", "licFile", "licFileName", "payItems", "dealerComment"):
             if name in raw:
                 details[name] = raw[name]
+        if isinstance(raw.get("stripePayment"), dict):
+            details["stripePayment"] = {"id": raw["stripePayment"].get("id")}
         if isinstance(details.get("payItems"), list):
             details["payItems"] = [
                 {key: item[key] for key in ("id", "quantity", "sum") if key in item}
@@ -328,10 +366,13 @@ class DriveModsParseClient:
         if not isinstance(encoded, str) or len(encoded) > ((self.max_license_bytes + 2) // 3) * 4:
             raise DriveModsVerificationError("Missing or oversized license binary")
         try:
-            content = base64.b64decode(encoded, validate=True)
+            # Live own records use standard Base64 without trailing '='. The
+            # site's browser decoder accepts it; validate alphabet and pad bits.
+            content = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True)
         except (ValueError, binascii.Error):
             raise DriveModsVerificationError("Invalid license binary encoding") from None
-        if base64.b64encode(content).decode("ascii") != encoded:
+        canonical = base64.b64encode(content).decode("ascii")
+        if encoded not in (canonical, canonical.rstrip("=")):
             raise DriveModsVerificationError("Non-canonical license binary encoding")
         digest = hashlib.sha256(content).hexdigest()
         head = content.lstrip()[:64].lower()

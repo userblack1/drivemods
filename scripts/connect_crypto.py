@@ -228,7 +228,7 @@ class SetupHandler(BaseHTTPRequestHandler):
             self._body_read = True
         page = ("<!doctype html><html lang='ru'><meta charset='utf-8'>"
                 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                "<title>Локальное подключение Binance</title>" + PAGE_STYLE
+                "<title>" + html.escape(getattr(self.server, "page_title", "Локальное подключение Binance")) + "</title>" + PAGE_STYLE
                 + "<main><h1>" + title + "</h1>" + body + "</main></html>").encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")

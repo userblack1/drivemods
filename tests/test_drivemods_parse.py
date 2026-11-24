@@ -64,6 +64,12 @@ def mock_client(rows=None, *, query_reply=None, login_reply=None, max_license_by
                 return login_reply(request)
             return httpx.Response(200, json={"objectId": OWNER, "username": "fixture-user",
                                             "sessionToken": "fixture-session-do-not-log"})
+        if request.url.path == "/parse/users/me":
+            assert body["_method"] == "GET"
+            assert body["_SessionToken"] == "fixture-session-do-not-log"
+            if query_reply is not None:
+                return query_reply(request)
+            return httpx.Response(200, json={"objectId": OWNER, "username": "fixture-user"})
         assert request.url.path == "/parse/functions/processQuery"
         assert body["type"] == "GET_ONE" and body["resource"] == "Record"
         assert body["_SessionToken"] == "fixture-session-do-not-log"
@@ -197,6 +203,24 @@ def test_source_and_previous_output_hashes_bind_resumed_downloads():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("padding", [True, False])
+def test_canonical_standard_base64_with_or_without_padding_matches_live_encoding(padding):
+    rows = records()
+    content = OUTPUT
+    while len(content) % 3 == 0:
+        content += b"x"
+    encoded = base64.b64encode(content).decode()
+    assert encoded.endswith("=")
+    rows["License001"]["licFile"] = encoded if padding else encoded.rstrip("=")
+
+    async def run():
+        async with mock_client(rows)[0] as client:
+            await logged_in(client)
+            verified = await client.reconcile_paid_license(expectation(), SOURCE)
+            assert verified.content == content and verified.sha256 == hashlib.sha256(content).hexdigest()
+    asyncio.run(run())
+
+
 def test_bytes_wrapper_decimal_amount_and_immutable_sanitized_record():
     rows = records()
     rows["License001"]["licFile"] = {"__type": "Bytes", "base64": base64.b64encode(OUTPUT).decode()}
@@ -287,3 +311,36 @@ def test_oversized_record_is_rejected_before_decoding():
 def test_invalid_expected_plan_price_and_identity_are_rejected(change):
     with pytest.raises(DriveModsVerificationError):
         replace(expectation(), **change)
+
+
+def test_explicit_session_export_and_verified_resume_without_password():
+    async def run():
+        async with mock_client()[0] as first:
+            await logged_in(first)
+            exported = first.export_session()
+            assert exported.username == "fixture-user" and exported.user_id == OWNER
+            assert "fixture" not in repr(exported)
+        second, seen = mock_client()
+        async with second:
+            identity = await second.resume_session(exported.session_token, exported.user_id, exported.username)
+            assert identity.user_id == OWNER
+            assert len(seen) == 1 and seen[0][0] == "/parse/users/me"
+            assert "password" not in seen[0][1]
+            assert (await second.get_owned_record("Payment001")).owner_id == OWNER
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reply", [
+    lambda _: httpx.Response(401, json={"error": "fixture-session-do-not-log"}),
+    lambda _: httpx.Response(200, json={"objectId": "OtherOwner", "username": "fixture-user"}),
+    lambda _: httpx.Response(200, json={"objectId": OWNER, "username": "another-user"}),
+])
+def test_invalid_saved_session_is_discarded_and_errors_are_sanitized(reply):
+    async def run():
+        async with mock_client(query_reply=reply)[0] as client:
+            with pytest.raises(DriveModsError) as caught:
+                await client.resume_session("fixture-session-do-not-log", OWNER, "fixture-user")
+            assert client.identity is None and "fixture" not in str(caught.value)
+            with pytest.raises(DriveModsError):
+                client.export_session()
+    asyncio.run(run())

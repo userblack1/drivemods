@@ -113,7 +113,10 @@ class Engine:
                     raise ValueError('Store payment not confirmed')
                 content = await self.store.download(order.reference)
                 validate_license(content,invoice['source_sha'],Settings(mode='demo' if ledger.simulation else 'live'))
-                folder = Path(invoice['source_path']).parent
+                # Output belongs to the invoice, even when multiple invoices
+                # intentionally refer to the same immutable uploaded source.
+                folder = Path(invoice['source_path']).parent / ('license-' + invoice_id)
+                folder.mkdir(exist_ok=True)
                 name = 'DEMO-NOT-A-LICENSE.txt' if ledger.simulation else 'device.license.bin'
                 output = folder/name
                 part = output.with_suffix(output.suffix+'.part')
@@ -132,8 +135,8 @@ class Engine:
                 if hashlib.sha256(output.read_bytes()).hexdigest() != invoice['output_sha']:
                     raise ValueError('License file changed')
                 name = 'DEMO-NOT-A-LICENSE.txt' if ledger.simulation else 'device.license.bin'
-                await self.delivery.send(invoice,output,name)
-                ledger.transition(invoice_id,'sending','delivered')
+                message_ref = await self.delivery.send(invoice,output,name)
+                ledger.mark_delivered(invoice_id, message_ref)
             except Exception as exc:
                 # A lost Telegram response can cause redelivery, never another purchase.
                 ledger.transition(invoice_id,'sending','ready',error=type(exc).__name__)
