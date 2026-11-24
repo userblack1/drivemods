@@ -10,6 +10,28 @@ import httpx
 from .tron import address_bytes
 
 
+_NETWORK_ERROR_TYPES=frozenset({
+    'ConnectError','ReadError','WriteError','CloseError','ConnectTimeout','ReadTimeout',
+    'WriteTimeout','PoolTimeout','ProxyError','UnsupportedProtocol','LocalProtocolError',
+    'RemoteProtocolError','TooManyRedirects','RequestError','TransportError','TimeoutException',
+})
+
+
+class BinanceReadError(RuntimeError):
+    """Only categorical diagnostics; never retain a response, request or message."""
+
+    def __init__(self, failure_type, *, http_status=None, error_code=None, network_type=None):
+        if failure_type not in _NETWORK_ERROR_TYPES|{'HTTPStatusError','InvalidJSON','UnexpectedError'}:
+            failure_type='UnexpectedError'
+        self.http_status=http_status if type(http_status) is int and 100<=http_status<=599 else None
+        self.error_code=error_code if type(error_code) is int and -(2**63)<=error_code<2**63 else None
+        self.network_type=network_type if network_type in _NETWORK_ERROR_TYPES else None
+        super().__init__('Binance read failed: '+failure_type)
+
+    def diagnostics(self):
+        return {'http_status':self.http_status,'error_code':self.error_code,'network_type':self.network_type}
+
+
 @dataclass(frozen=True)
 class DepositCredit:
     deposit_id: str
@@ -91,10 +113,25 @@ class BinanceReader:
         signature=hmac.new(self._secret,query.encode(),hashlib.sha256).hexdigest()
         try:
             response=await self._client.get(path+'?'+query+'&signature='+signature)
-            response.raise_for_status()
-            return response.json()
         except Exception as exc:
-            raise RuntimeError('Binance read failed: '+type(exc).__name__) from None
+            name=type(exc).__name__
+            network_type=name if name in _NETWORK_ERROR_TYPES else None
+            raise BinanceReadError(network_type or 'UnexpectedError',network_type=network_type) from None
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            error_code=None
+            try:
+                body=response.json()
+                if isinstance(body,dict):
+                    error_code=body.get('code')
+            except Exception:
+                pass
+            raise BinanceReadError('HTTPStatusError',http_status=response.status_code,error_code=error_code) from None
+        try:
+            return response.json()
+        except Exception:
+            raise BinanceReadError('InvalidJSON',http_status=response.status_code) from None
 
     async def check_read_only(self):
         self._permissions_checked_at=None

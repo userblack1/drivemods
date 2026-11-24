@@ -18,7 +18,7 @@ import re
 import sqlite3
 import time
 
-from .binance import BinanceReader
+from .binance import BinanceReader, BinanceReadError
 from .tron import address_bytes
 
 
@@ -172,6 +172,11 @@ class ExchangeObservations:
             db.execute('UPDATE config SET cursor_ms=? WHERE singleton=1', (end_ms + 1,))
 
     def health(self, *, ok, scan_complete=False, error=None):
+        error_details=error.diagnostics() if isinstance(error,BinanceReadError) else None
+        error_type=type(error).__name__ if isinstance(error,BaseException) else error
+        if error_type is not None and (not isinstance(error_type,str)
+                or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}',error_type)):
+            error_type='UnknownError'
         with self.database() as db:
             total, available = db.execute('''SELECT count(*),coalesce(sum(
                 CASE WHEN status=1 AND travel_rule_status=0 THEN 1 ELSE 0 END),0) FROM deposits''').fetchone()
@@ -181,7 +186,7 @@ class ExchangeObservations:
                   'checked_at_utc': datetime.now(timezone.utc).isoformat(),
                   'first_started_ms': first, 'observed_deposits': total, 'available_deposits': available,
                   'payment_confirmed_for_orders': False, 'license_purchase_enabled': False,
-                  'error_type': error}
+                  'error_type': error_type, 'error_details': error_details}
         temp = self.folder / 'exchange-health.part'
         temp.write_text(json.dumps(report, indent=2), encoding='utf-8')
         temp.replace(self.folder / 'exchange-health.json')
@@ -217,8 +222,10 @@ async def run(address, folder, *, once=False, interval=30):
                     return result
             except Exception as exc:
                 failures += 1
-                store.health(ok=False, error=type(exc).__name__)
-                logging.warning('Exchange observer deferred: %s', type(exc).__name__)
+                store.health(ok=False, error=exc)
+                details=exc.diagnostics() if isinstance(exc,BinanceReadError) else None
+                logging.warning('Exchange observer deferred: %s %s',type(exc).__name__,
+                                json.dumps(details,sort_keys=True))
                 if once:
                     raise RuntimeError('Exchange observer check failed: ' + type(exc).__name__) from None
             await asyncio.sleep(min(interval * 2 ** min(failures, 3), 300))
