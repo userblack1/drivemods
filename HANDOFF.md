@@ -63,6 +63,10 @@ ACL ограничена текущим Windows-пользователем и SY
 
 Эти шаги описывают будущий выпуск: подготовка передачи не выполняет переключение или перезапуск.
 
+## Новый экземпляр лицензий — 24 ноября 2026
+
+Создан и запущен https://t.me/DriveMods_licensebot, bot ID 9258163194. Отдельная служба `drivemods-license-bot.service`, приложение `/opt/drivemods-license-bot`, env `/etc/drivemods-license-bot.env`, данные `/var/lib/drivemods-license-bot`. Ядро совпадает с оригиналом, режим operator, FULL 9000 / ECO 6500 сомов, те же администраторы. Старый бот и остальные службы не перезапускались. Старые заказы не переносились. Полная схема, проверки и порядок обновления: [docs/drivemods-licensebot-deployment.md](docs/drivemods-licensebot-deployment.md).
+
 ## GitHub и итог совместной работы
 
 Код опубликован в https://github.com/userblack1/drivemods, основная ветка main. Репозиторий публичный по прямому указанию владельца. Локальная main отслеживает origin/main; два автоматических локальных коммита подготовки сохранены отдельно в local-handoff-audit и в резервной копии Git. Истории не переписывались и force push не применялся.

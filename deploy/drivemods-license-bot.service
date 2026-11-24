@@ -1,0 +1,35 @@
+[Unit]
+Description=DriveMods License Bot - operator fulfillment
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=drivemods-license
+Group=drivemods-license
+WorkingDirectory=/opt/drivemods-license-bot
+EnvironmentFile=/etc/drivemods-license-bot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUTF8=1
+ExecStartPre=/opt/drivemods-license-bot/.venv/bin/python -m drivemods_bot.server_operator --check
+ExecStart=/opt/drivemods-license-bot/.venv/bin/python -m drivemods_bot.server_operator
+Restart=always
+RestartSec=5
+TimeoutStopSec=40
+UMask=0077
+StateDirectory=drivemods-license-bot
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+BindReadOnlyPaths=/etc/drivemods-license-bot.hosts:/etc/hosts
+ReadWritePaths=/var/lib/drivemods-license-bot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

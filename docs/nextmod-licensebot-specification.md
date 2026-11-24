@@ -15,7 +15,7 @@
 
 FULL — русификация с приложениями, ECO — русификация без приложений. Это локальный каталог, а не проверка совместимости автомобиля в DriveMods. USD = закупка + MARKUP_USD=10; суммы QR заданы отдельно, без курса.
 
-Для функционально идентичной копии нужно повторно использовать проверенное ядро, не переписывать его по пересказу. Username, token, bot ID, служба и хранилище нового бота должны отличаться. Старые заказы, пользователи и file_id автоматически не переходят. Доступность @DriveMods_licensebot пока не проверена: решение принимает BotFather.
+Для функционально идентичной копии нужно повторно использовать проверенное ядро, не переписывать его по пересказу. Username, token, bot ID, служба и хранилище нового бота должны отличаться. Старые заказы, пользователи и file_id автоматически не переходят. Обновление 24 ноября 2026: @DriveMods_licensebot создан и запущен; фактическое развёртывание описано в [drivemods-licensebot-deployment.md](drivemods-licensebot-deployment.md).
 
 ## 2. Технологии, структура, точки входа
 
@@ -180,7 +180,7 @@ Forwarder читает события каждые 3 сек, пишет собс
 
 systemd: Restart=always/5 сек, TimeoutStopSec=40, UMask=0077, StateDirectoryMode=0700, NoNewPrivileges, PrivateTmp, ProtectSystem=strict, ProtectHome, ReadWritePaths DATA_DIR, ограниченные адресные семейства, журнал. Выделенный hosts-файл монтируется read-only; глобальные DNS/TLS не менять.
 
-Предлагаемые новые, ещё не созданные пути: **drivemods-license-bot.service**, user/group **drivemods-license**, app **/opt/drivemods-license-bot**, env **/etc/drivemods-license-bot.env**, data **/var/lib/drivemods-license-bot**, отдельная .venv/bot.lock. Проверить занятость перед созданием. Новая служба прямо вызывает server_operator. Polling не требует нового публичного порта.
+Созданы и проверены 24 ноября 2026: **drivemods-license-bot.service**, user/group **drivemods-license**, app **/opt/drivemods-license-bot**, env **/etc/drivemods-license-bot.env**, data **/var/lib/drivemods-license-bot**, отдельная .venv/bot.lock. Новая служба прямо вызывает server_operator. Polling не требует нового публичного порта. Не выполняйте создание повторно поверх действующего экземпляра.
 
 Новый приватный env, права 600; token новый, ADMIN_IDS/SUPPORT_CONTACT задаёт владелец. Несекретные параметры:
 

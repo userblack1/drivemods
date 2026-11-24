@@ -5,7 +5,9 @@
   "original_bot_username": "NextModLicenseBot",
   "original_bot_id": 9227738530,
   "new_bot_username": "DriveMods_licensebot",
-  "new_username_availability": "not_verified; BotFather must confirm",
+  "new_username_availability": "created_and_running_verified_2026-11-24",
+  "new_bot_id": 9258163194,
+  "new_bot_deployment_document": "docs/drivemods-licensebot-deployment.md",
   "canonicalization": "UTF-8-sig decode, replace CRLF with LF, encode UTF-8",
   "core_files": [
     {
