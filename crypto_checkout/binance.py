@@ -18,6 +18,29 @@ class DepositCredit:
     amount_atoms: int
 
 
+def validate_read_only_permissions(permissions):
+    if not isinstance(permissions,dict) or permissions.get('enableReading') is not True:
+        raise ValueError('Binance reading permission is required')
+    required_disabled=(
+        'enableWithdrawals','enableSpotAndMarginTrading','enableFutures','enableMargin',
+        'enableInternalTransfer','permitsUniversalTransfer','enableVanillaOptions',
+        'enableFixApiTrade','enablePortfolioMarginTrading',
+    )
+    if any(permissions.get(key) is not False for key in required_disabled):
+        raise ValueError('Use a verified strictly read-only Binance key')
+    read_flags={'enableReading','enableFixReadOnly'}
+    for key,value in permissions.items():
+        if not isinstance(key,str):
+            raise ValueError('Invalid Binance permission response')
+        if key.startswith(('enable','permits')):
+            if key in read_flags:
+                if type(value) is not bool:
+                    raise ValueError('Invalid Binance reading permission')
+            elif value is not False:
+                # New mutation flags must not silently broaden accepted keys.
+                raise ValueError('Unrecognized or enabled Binance mutation permission')
+
+
 def match_credit(rows, transfer):
     if not isinstance(rows,list):
         raise ValueError('Invalid Binance deposit history')
@@ -25,11 +48,15 @@ def match_credit(rows, transfer):
     for row in rows:
         if not isinstance(row,dict):
             raise ValueError('Invalid Binance deposit')
-        if (row.get('coin')!='USDT' or row.get('network')!='TRX' or row.get('status')!=1
-                or row.get('travelRuleStatus',0)!=0 or row.get('addressTag','')
+        if (row.get('coin')!='USDT' or row.get('network')!='TRX'
+                or type(row.get('status')) is not int or row['status']!=1
+                or type(row.get('travelRuleStatus')) is not int or row['travelRuleStatus']!=0
+                or row.get('addressTag','')
                 or str(row.get('txId','')).lower()!=transfer.txid or row.get('address')!=transfer.address):
             continue
         try:
+            if not isinstance(row.get('amount'),str):
+                raise ValueError('Invalid Binance amount')
             amount=Decimal(row['amount'])*1_000_000
         except (InvalidOperation,KeyError,TypeError):
             raise ValueError('Invalid Binance amount') from None
@@ -49,6 +76,7 @@ class BinanceReader:
             raise ValueError('Binance read-only credentials are not configured')
         self._secret=api_secret.encode()
         self._clock=clock
+        self._permissions_checked_at=None
         self._client=httpx.AsyncClient(base_url='https://api.binance.com',
               headers={'X-MBX-APIKEY':api_key},timeout=20,trust_env=False,follow_redirects=False,transport=transport)
 
@@ -69,18 +97,27 @@ class BinanceReader:
             raise RuntimeError('Binance read failed: '+type(exc).__name__) from None
 
     async def check_read_only(self):
+        self._permissions_checked_at=None
         permissions=await self._get('/sapi/v1/account/apiRestrictions',{})
-        if not isinstance(permissions,dict) or permissions.get('enableReading') is not True:
-            raise ValueError('Binance reading permission is required')
-        for key in ('enableWithdrawals','enableSpotAndMarginTrading','enableFutures',
-                    'enableMargin','enableInternalTransfer','permitsUniversalTransfer','enableVanillaOptions'):
-            if permissions.get(key) is not False:
-                raise ValueError('Use a verified strictly read-only Binance key')
+        validate_read_only_permissions(permissions)
+        self._permissions_checked_at=self._clock()
         return True
 
     async def credit(self, transfer):
         address_bytes(transfer.address)
+        now=self._clock()
+        checked=self._permissions_checked_at
+        # Do not rely on callers remembering the preflight. Revalidate during a
+        # long-running watcher too, since key permissions can change later.
+        if checked is None or not 0 <= now-checked < 60:
+            await self.check_read_only()
+        end_time=int(self._clock()*1000)
+        start_time=max(0,transfer.timestamp_ms-60_000)
+        if start_time>end_time:
+            raise ValueError('Transfer timestamp is ahead of the local clock')
+        # Binance requires each requested history window to be shorter than
+        # ninety days, even when the query is narrowed to a known TXID.
+        end_time=min(end_time,start_time+90*86400*1000-1)
         rows=await self._get('/sapi/v1/capital/deposit/hisrec',{'coin':'USDT','txId':transfer.txid,
-                           'startTime':max(0,transfer.timestamp_ms-60_000),
-                           'endTime':int(self._clock()*1000),'limit':1000})
+                           'startTime':start_time,'endTime':end_time,'limit':1000})
         return match_credit(rows,transfer)

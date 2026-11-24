@@ -218,6 +218,11 @@ def test_read_only_binance_client_signs_only_allowed_get_requests():
         unsigned,signature=query.rsplit('&signature=',1)
         assert hmac.compare_digest(signature,hmac.new(b'test-secret',unsigned.encode(),hashlib.sha256).hexdigest())
         assert request.method=='GET' and request.headers['X-MBX-APIKEY']=='test-key'
+        if request.url.path.endswith('apiRestrictions'):
+            return httpx.Response(200,json={'enableReading':True,'enableWithdrawals':False,
+                'enableSpotAndMarginTrading':False,'enableFutures':False,'enableMargin':False,
+                'enableInternalTransfer':False,'permitsUniversalTransfer':False,'enableVanillaOptions':False,
+                'enableFixApiTrade':False,'enablePortfolioMarginTrading':False})
         return httpx.Response(200,json=[])
     async def scenario():
         client=BinanceReader('test-key','test-secret',transport=httpx.MockTransport(handler),clock=lambda:2000)
@@ -226,7 +231,7 @@ def test_read_only_binance_client_signs_only_allowed_get_requests():
         with pytest.raises(ValueError):await client._get('/sapi/v1/capital/withdraw/apply',{})
         await client.close()
     asyncio.run(scenario())
-    assert len(requests)==1
+    assert len(requests)==2
 
 
 def test_tron_client_uses_solidified_receipt_and_paginates_without_following_urls():
