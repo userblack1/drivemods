@@ -95,3 +95,26 @@ def test_offline_export_contains_only_public_wallet_configuration():
     assert account.PrivateKey().ToExtended() not in repr(public)
     assert str(mnemonic) not in repr(public)
     with pytest.raises(ValueError):export_public(str(mnemonic),'wrong extra passphrase',first)
+
+
+def test_owner_cli_exports_public_config_without_echoing_recovery_words(tmp_path,monkeypatch,capsys):
+    import json
+    from types import SimpleNamespace
+    from scripts import export_tron_watch as tool
+    mnemonic=str(bip.Bip39MnemonicGenerator().FromEntropy(hashlib.sha256(b'LOCAL CLI SYNTHETIC TEST').digest()))
+    account=bip.Bip44.FromSeed(bip.Bip39SeedGenerator(mnemonic).Generate(),bip.Bip44Coins.TRON).Purpose().Coin().Account(0)
+    first=account.Change(bip.Bip44Changes.CHAIN_EXT).AddressIndex(0).PublicKey().ToAddress()
+    folder=tmp_path/'data/new-license-bot';folder.mkdir(parents=True)
+    dest=folder/'public.json'
+    monkeypatch.setattr(tool,'ROOT',tmp_path)
+    monkeypatch.setattr(tool.sys,'stdin',SimpleNamespace(isatty=lambda:True))
+    monkeypatch.setattr(tool.sys,'argv',['export','--output',str(dest),'--expected-address',first])
+    answers=iter([mnemonic,''])
+    monkeypatch.setattr(tool.getpass,'getpass',lambda prompt:next(answers))
+    assert tool.main()==0
+    payload=dest.read_text()
+    assert mnemonic not in payload+capsys.readouterr().out
+    assert json.loads(payload)['account_xpub']==account.PublicKey().ToExtended()
+    # Existing configuration is rejected before requesting any secret again.
+    monkeypatch.setattr(tool.getpass,'getpass',lambda prompt:pytest.fail('must not ask for words'))
+    assert tool.main()==1

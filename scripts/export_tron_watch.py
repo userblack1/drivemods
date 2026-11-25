@@ -28,6 +28,8 @@ def export_public(mnemonic, passphrase, expected_first):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--expected-address',help='Public first address confirmed in the owner wallet')
+    parser.add_argument('--pause',action='store_true',help='Keep the owner terminal open after export')
     args=parser.parse_args()
     mnemonic=passphrase=''
     try:
@@ -36,21 +38,29 @@ def main():
         private=ROOT/'data/new-license-bot'
         if output.parent!=private or not private.is_dir() or output.exists():
             raise ValueError('Choose a new output in the protected local configuration folder')
+        if any(p.is_symlink() for p in (output,*output.parents)):
+            raise ValueError('Credential paths must not use symbolic links')
         if not sys.stdin.isatty():raise ValueError('Interactive owner terminal required')
-        print('Local OFFLINE public-only export. Do not enter secrets in chat or on the VPS.')
-        expected=input('First TRON receiving address shown by your own wallet: ').strip()
-        mnemonic=getpass.getpass('Wallet recovery phrase (hidden, not stored): ')
-        passphrase=getpass.getpass('BIP39 extra passphrase, empty if unused (hidden): ')
+        print('Локальный экспорт только публичного ключа. Сетевых запросов и переводов нет.')
+        print('Фраза не сохраняется. Не вводите её в чат, браузер или на сервере.')
+        expected=args.expected_address or input('Первый адрес TRON из вашего кошелька: ').strip()
+        from crypto_checkout.tron import address_bytes
+        address_bytes(expected)
+        print('Сверьте первый адрес с TronLink: '+expected)
+        mnemonic=getpass.getpass('Резервные слова через пробел (ввод скрыт): ')
+        passphrase=getpass.getpass('Дополнительная фраза BIP39, обычно пусто — Enter (не пароль TronLink): ')
         public=export_public(mnemonic,passphrase,expected)
         fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(fd,'w',encoding='utf-8') as f:
             json.dump(public,f,indent=2);f.flush();os.fsync(f.fileno())
-        print('Public configuration exported. No funds moved and no private key was exported.')
+        print('Готово. Сохранён только публичный ключ. Приватные ключи не экспортировались.')
     except Exception:
-        print('Export not completed. Check the wallet/path and protected destination. No secret values printed.')
+        print('Экспорт не завершён. Проверьте слова, адрес и папку. Значения не выводятся.')
         return 1
     finally:
         mnemonic=passphrase=''
+        if args.pause and sys.stdin.isatty():
+            input('Нажмите Enter, чтобы закрыть окно: ')
     return 0
 
 
