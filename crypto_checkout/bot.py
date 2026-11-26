@@ -12,9 +12,11 @@ import time
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (BufferedInputFile, CallbackQuery, CopyTextButton, ErrorEvent,
+                           InlineKeyboardButton, InlineKeyboardMarkup, Message)
 
 from .checkout import CheckoutUnavailable, invoice_text
+from .payment_qr import payment_details, payment_qr
 from .runtime import _TokenLogFilter
 
 
@@ -80,6 +82,34 @@ def payment_text(invoice):
     return invoice_text(invoice) + '\nСрок оплаты: до ' + deadline + '.\n/status ' + invoice['id']
 
 
+async def send_payment(message, invoice):
+    if invoice['state'] != 'awaiting_payment' or invoice['expires_ms'] <= int(time.time() * 1000):
+        await message.answer(order_summary(invoice))
+        return
+    try:
+        address, amount = payment_details(invoice)
+    except ValueError:
+        # Expiry can occur between the first check and rendering; don't issue
+        # fresh-looking payment instructions for that invoice.
+        await message.answer('Счёт недоступен для оплаты. Проверьте /status ' + invoice['id'])
+        return
+    text = payment_text(invoice) + (
+        '\n\nQR содержит адрес этого заказа. В «Мой О!» выберите USDT TRC20, '
+        'укажите сумму из счёта и отсканируйте QR. Сумма в приложении может не подставиться автоматически.')
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='Скопировать адрес', copy_text=CopyTextButton(text=address)),
+        InlineKeyboardButton(text='Скопировать сумму', copy_text=CopyTextButton(text=amount))]])
+    try:
+        png = await asyncio.to_thread(payment_qr, invoice)
+        await message.answer_photo(BufferedInputFile(png, filename='payment-' + invoice['id'] + '.png'),
+                                   caption=text, reply_markup=keyboard)
+    except Exception as exc:
+        # Photo delivery can fail after Telegram accepted it. The fallback
+        # repeats the SAME invoice; never allocate another address or amount.
+        logging.getLogger(__name__).warning('Payment QR delivery deferred: %s', type(exc).__name__)
+        await message.answer(text, reply_markup=keyboard)
+
+
 def make_router(checkout):
     router = Router(name='drivemods_crypto_checkout')
     router.message.filter(F.chat.type == 'private')
@@ -132,7 +162,7 @@ def make_router(checkout):
             await message.answer('Заказ не найден в вашем диалоге. Ваши заказы: /orders.')
             return
         if row['state'] == 'awaiting_payment' and _ready(checkout):
-            await message.answer(payment_text(row))
+            await send_payment(message, row)
         else:
             text = order_summary(row)
             if row['state'] == 'awaiting_payment' and not _ready(checkout):
@@ -209,7 +239,7 @@ def make_router(checkout):
             await call.answer('Не удалось подготовить счёт. Повторите позже.', show_alert=True)
             return
         await call.answer()
-        await message.answer(payment_text(row) if row['state'] == 'awaiting_payment' else order_summary(row))
+        await send_payment(message, row)
 
     @router.message(F.photo)
     async def photo(message: Message):

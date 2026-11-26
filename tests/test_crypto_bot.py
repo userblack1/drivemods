@@ -101,7 +101,8 @@ def callback(upload_id, *, plan='full', user=1001, chat=None, seq=20):
 
 
 def outputs(session):
-    return [item.text for item in session.methods if item.__api_method__ == 'sendMessage']
+    return [(item.text if item.__api_method__ == 'sendMessage' else item.caption)
+            for item in session.methods if item.__api_method__ in {'sendMessage', 'sendPhoto'}]
 
 
 def upload_row(book):
@@ -144,7 +145,7 @@ def test_invoice_selection_is_owner_only_and_replayed_click_returns_exact_same_i
     texts = outputs(session)
     assert texts[-1] == texts[-2] and '100.01 USDT' in texts[-1]
     assert TEST_ADDRESS in texts[-1] and 'Срок оплаты:' in texts[-1]
-    assert not any('QR' in text for text in texts)
+    assert 'QR содержит адрес этого заказа' in texts[-1]
 
 
 def test_eco_invoice_has_its_own_exact_amount(tmp_path):

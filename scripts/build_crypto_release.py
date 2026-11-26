@@ -20,6 +20,7 @@ from scripts.handoff_audit import audit,indexed_blobs
 REQUIRED=frozenset({
     'requirements.lock','requirements.dev.lock','requirements.checkout.lock','README.md','HANDOFF.md',
     'crypto_checkout/application.py','crypto_checkout/bot.py','crypto_checkout/checkout.py',
+    'crypto_checkout/payment_qr.py',
     'crypto_checkout/runtime.py','crypto_checkout/store_adapter.py','crypto_checkout/binance.py',
     'crypto_checkout/ledger.py','crypto_checkout/tron.py','crypto_checkout/fulfillment.py',
     'crypto_checkout/card_vault.py','crypto_checkout/stripe_browser.py',
