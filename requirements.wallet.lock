@@ -1,0 +1,18 @@
+# Optional watch-only receiving-address preparation, not enabled on the VPS.
+-r requirements.checkout.lock
+bip-utils==2.13.0
+bitarray==3.12.4
+cbor2==6.3.0
+charset-normalizer==3.5.3
+coincurve==21.0.0
+ecdsa==0.19.2
+ed25519-blake2b-fork==1.4.2
+py-sr25519-bindings==0.2.4
+pycryptodome==4.6.0
+pycryptodomex==3.24.2
+pynacl==1.6.2
+pytoniq-core-fork==0.1.48
+requests==2.34.2
+six==1.17.0
+urllib3==2.8.0
+x25519==0.0.2

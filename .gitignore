@@ -9,6 +9,8 @@
 *.p12
 *.pfx
 *.keystore
+*.card-vault
+*.owner-card.enc
 id_rsa*
 id_ed25519*
 credentials*.json

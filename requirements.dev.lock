@@ -1,3 +1,4 @@
 -r requirements.firmware.lock
+-r requirements.checkout.lock
 Pillow==13.0.0
 zxing-cpp==3.1.1

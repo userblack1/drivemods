@@ -1,0 +1,29 @@
+[Unit]
+Description=DriveMods read-only Binance deposit observer - no orders or purchases
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=drivemods-binance
+Group=drivemods-binance
+WorkingDirectory=/opt/drivemods-binance-observer
+EnvironmentFile=/etc/drivemods-binance-observer.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUTF8=1
+ExecStart=/opt/drivemods-license-bot/.venv/bin/python -m crypto_checkout.exchange_observer
+Restart=always
+RestartSec=30
+UMask=0077
+StateDirectory=drivemods-binance-observer
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/drivemods-binance-observer
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
