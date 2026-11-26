@@ -54,6 +54,10 @@ class Ledger:
                 db.execute('ALTER TABLE invoices ADD COLUMN delivery_ref TEXT')
             if 'inspection_origin' not in columns:
                 db.execute('ALTER TABLE invoices ADD COLUMN inspection_origin TEXT')
+            if 'payment_policy' not in columns:
+                db.execute("ALTER TABLE invoices ADD COLUMN payment_policy TEXT NOT NULL DEFAULT 'binance'")
+            if 'wallet_fingerprint' not in columns:
+                db.execute('ALTER TABLE invoices ADD COLUMN wallet_fingerprint TEXT')
             marker = db.execute("SELECT value FROM metadata WHERE key='simulation'").fetchone()
             if marker and marker[0] != str(simulation):
                 raise ValueError('Simulation and real invoices cannot share a ledger')
@@ -230,6 +234,9 @@ class Ledger:
             db.execute('''INSERT INTO invoices(id,user_id,plan,source_path,source_sha,address,amount_atoms,cost_cents,
                        created_ms,expires_ms,start_block) VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
                        (invoice_id,user_id,plan,str(source),digest,address,amount,cost,now,now+ttl*1000,start_block))
+            if receiving_wallet is not None:
+                db.execute("UPDATE invoices SET payment_policy='tron_wallet',wallet_fingerprint=? WHERE id=?",
+                           (receiving_wallet.fingerprint,invoice_id))
             if request_key is not None:
                 db.execute('INSERT INTO invoice_requests VALUES(?,?,?)',(user_id,request_key,invoice_id))
             self._event(db,invoice_id,'invoice_created')
@@ -254,7 +261,15 @@ class Ledger:
                     classification = 'additional_payment_review'
                 else:
                     classification = 'confirmed'
-                    next_state = 'chain_confirmed' if self.require_exchange_credit else 'paid'
+                    if row['payment_policy']=='tron_wallet':
+                        marker=db.execute("SELECT value FROM metadata WHERE key='receiving_wallet'").fetchone()
+                        if not marker or marker[0]!=row['wallet_fingerprint']:
+                            raise ValueError('Receiving wallet binding is not verified')
+                        next_state='paid'
+                    elif row['payment_policy']=='binance':
+                        next_state = 'chain_confirmed' if self.require_exchange_credit else 'paid'
+                    else:
+                        raise ValueError('Unsupported payment confirmation policy')
                     db.execute('UPDATE invoices SET state=?,txid=?,log_index=? WHERE id=?', (next_state,transfer.txid,transfer.log_index,row['id']))
                 self._event(db,row['id'],classification)
             db.execute('INSERT INTO deposits VALUES(?,?,?,?,?,?,?)',

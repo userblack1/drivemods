@@ -17,6 +17,9 @@ LoadCredential=store-session.json:/etc/drivemods-checkout-session.json
 # Optional: uncomment only after the owner approved and installed both protected files.
 # LoadCredential=owner-card.enc:/etc/drivemods-checkout-owner-card.enc
 # LoadCredential=owner-card.key:/etc/drivemods-checkout-owner-card.key
+# Optional, only after exact owner confirmation of the first related address:
+# LoadCredential=receiving-wallet.json:/etc/drivemods-checkout-receiving-wallet.json
+# LoadCredential=wallet-verification.json:/etc/drivemods-checkout-wallet-verification.json
 Environment=CRYPTO_DATA_DIR=/var/lib/drivemods-checkout
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1

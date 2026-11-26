@@ -118,3 +118,69 @@ def test_owner_cli_exports_public_config_without_echoing_recovery_words(tmp_path
     # Existing configuration is rejected before requesting any secret again.
     monkeypatch.setattr(tool.getpass,'getpass',lambda prompt:pytest.fail('must not ask for words'))
     assert tool.main()==1
+
+
+def test_mixed_old_binance_and_new_wallet_payments_preserve_credit_policy(tmp_path):
+    from crypto_checkout.demo import TEST_ADDRESS
+    from crypto_checkout.binance import DepositCredit
+    _,_,wallet=wallet_fixture()
+    book=Ledger(tmp_path/'mixed.sqlite3',simulation=True,require_exchange_credit=True)
+    source=tmp_path/'old.id';source.write_bytes(b'SYNTHETIC OLD DEVICE')
+    old=book.invoice(uuid4().hex,900,'eco',source,hashlib.sha256(source.read_bytes()).hexdigest(),1,
+                     shared_address=TEST_ADDRESS,allow_amount_suffix=True,now_ms=1_000_000)
+    new=issue(book,tmp_path,wallet,0)
+    book=Ledger(book.path,simulation=True,require_exchange_credit=True)
+    for i,row in enumerate([new,old]):
+        tx=f'{i+1:064x}'
+        t=parse_solid_receipt(synthetic_receipt(row['address'],row['amount_atoms'],tx,
+                              timestamp_ms=row['created_ms']+1),tx)[0]
+        assert book.observe(t)=='confirmed'
+        assert book.observe(t)=='duplicate'
+        if row['id']==new['id']:assert book.get(new['id'])['state']=='paid'
+        else:
+            assert book.get(old['id'])['state']=='chain_confirmed'
+            book.confirm_exchange(old['id'],DepositCredit('TEST-OLD-CREDIT',tx,row['address'],row['amount_atoms']))
+    assert book.get(old['id'])['state']=='paid'
+    assert book.get(new['id'])['payment_policy']=='tron_wallet'
+    assert book.get(old['id'])['payment_policy']=='binance'
+    assert book.require_exchange_credit is True
+
+
+def test_wallet_bootstrap_requires_exact_explicit_owner_verification(tmp_path):
+    from types import SimpleNamespace
+    import json
+    from crypto_checkout.application import _receiving_wallet,ConfigurationError
+    account,first,wallet=wallet_fixture()
+    cfg=tmp_path/'public.json';proof=tmp_path/'proof.json'
+    public={'network':'TRON','token':'USDT','account_path':"m/44'/195'/0'",
+            'account_xpub':account.PublicKey().ToExtended(),'first_address':first,'fingerprint':wallet.fingerprint}
+    verified={'fingerprint':wallet.fingerprint,'first_address':first,
+              'first_child_address':wallet.address(1),'owner_confirmed':True}
+    for p,d in [(cfg,public),(proof,verified)]:p.write_text(json.dumps(d));p.chmod(0o600)
+    settings=SimpleNamespace(receiving_wallet_file=cfg,wallet_verification_file=proof)
+    assert _receiving_wallet(settings).address(1)==wallet.address(1)
+    verified['owner_confirmed']=False;proof.write_text(json.dumps(verified))
+    with pytest.raises(ConfigurationError):_receiving_wallet(settings)
+    settings.wallet_verification_file=None
+    with pytest.raises(ConfigurationError):_receiving_wallet(settings)
+
+
+def test_checkout_wallet_issues_exact_prices_without_cent_suffix(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from crypto_checkout.checkout import CheckoutService,invoice_text
+    from crypto_checkout.demo import TEST_ADDRESS
+    _,_,wallet=wallet_fixture()
+    class Chain:
+        async def height(self):return 1
+    book=Ledger(tmp_path/'orders.sqlite3',simulation=False)
+    service=CheckoutService(book,tmp_path/'uploads',Chain(),SimpleNamespace(ready=True),
+                             address=TEST_ADDRESS,receiving_wallet=wallet)
+    async def customers():
+        return await asyncio.gather(*(service.choose(service.upload(i+1,'device.id',f'DEVICE{i}'.encode(),f'tg:{i}')['id'],
+                                      i+1,'full' if i%2 else 'eco') for i in range(120)))
+    rows=asyncio.run(customers())
+    assert len({r['address'] for r in rows})==120
+    assert {r['amount_atoms'] for r in rows}=={100_000_000,70_000_000}
+    assert all(r['payment_policy']=='tron_wallet' for r in rows)
+    assert all('Binance' not in invoice_text(r) for r in rows)

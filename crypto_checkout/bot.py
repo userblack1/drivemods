@@ -22,7 +22,7 @@ MAX_UPLOAD = 1_048_576
 UNAVAILABLE = ('Автоматическое оформление временно недоступно. '
                'Новый счёт сейчас не выставляется. Статус существующего заказа: /orders.')
 UNTRUSTED_RECEIPT = ('Чек, скриншот или сообщение об оплате не подтверждают поступление. '
-                     'Бот проверяет перевод в сети TRON и зачисление Binance. '
+                     'Бот проверяет реальное поступление по реквизитам вашего счёта. '
                      'Статус вашего заказа: /orders.')
 STATE_LABELS = {
     'awaiting_payment': 'Ожидается точная сумма по счёту',
@@ -61,7 +61,7 @@ def _private_user(message):
 
 def _ready(checkout):
     value = checkout.readiness() if callable(checkout.readiness) else checkout.readiness
-    return (value.ready is True and checkout.allow_unique_cents is True
+    return (value.ready is True and (checkout.allow_unique_cents is True or getattr(checkout,'receiving_wallet',None) is not None)
             and checkout.ledger.simulation is False)
 
 
@@ -92,11 +92,13 @@ def make_router(checkout):
         if not _ready(checkout):
             await message.answer(UNAVAILABLE)
             return
+        payment_hint=('Каждый заказ получает отдельный адрес: FULL ровно 100 USDT, ECO ровно 70 USDT. '
+                      if getattr(checkout,'receiving_wallet',None) is not None else
+                      'Перед оплатой бот покажет точную сумму счёта с добавлением 0,01–0,99 USDT для определения вашего платежа. ')
         await message.answer(
             'Пришлите файл идентификатора устройства Device ID (.bin или .id, до 1 МБ). '
             'Затем выберите FULL — 100 USDT или ECO — 70 USDT. '
-            'Перед оплатой бот покажет точную сумму счёта с добавлением 0,01–0,99 USDT '
-            'для определения вашего платежа. После подтверждённой оплаты начнётся оформление лицензии.\n'
+            +payment_hint+'После подтверждённой оплаты начнётся оформление лицензии.\n'
             'Мои заказы: /orders. Статус: /status номер_заказа.')
 
     @router.message(Command('orders'))
@@ -177,8 +179,9 @@ def make_router(checkout):
         buttons = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text='FULL · 100 USDT', callback_data='choose:' + uploaded['id'] + ':full'),
             InlineKeyboardButton(text='ECO · 70 USDT', callback_data='choose:' + uploaded['id'] + ':eco')]])
-        await message.answer('Device ID получен. Выберите пакет. В счёте будет указана точная сумма '
-                             'с добавлением 0,01–0,99 USDT для определения вашего перевода.',
+        hint=('Для заказа будет создан отдельный адрес оплаты.' if getattr(checkout,'receiving_wallet',None) is not None
+              else 'В счёте будет указана точная сумма с добавлением 0,01–0,99 USDT для определения вашего перевода.')
+        await message.answer('Device ID получен. Выберите пакет. '+hint,
                              reply_markup=buttons)
 
     @router.callback_query(F.data.startswith('choose:'))

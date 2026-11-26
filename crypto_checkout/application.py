@@ -142,6 +142,8 @@ class ApplicationSettings:
     browser_executable: Path | None = field(default=None,repr=False)
     binding_policy: str = 'strict'
     allow_first_live_validation: bool = False
+    receiving_wallet_file: Path | None = field(default=None,repr=False)
+    wallet_verification_file: Path | None = field(default=None,repr=False)
 
     @classmethod
     def from_mapping(cls, values, *, root=ROOT):
@@ -192,7 +194,9 @@ class ApplicationSettings:
                    card_key_file=_path(_string(values,'CRYPTO_CARD_KEY_FILE'),root),
                    stripe_publishable_key=publishable,
                    browser_executable=_path(_string(values,'CRYPTO_BROWSER_EXECUTABLE'),root),
-                   binding_policy=policy,allow_first_live_validation=first_validation)
+                   binding_policy=policy,allow_first_live_validation=first_validation,
+                   receiving_wallet_file=_path(_string(values,'CRYPTO_RECEIVING_WALLET_FILE'),root),
+                   wallet_verification_file=_path(_string(values,'CRYPTO_WALLET_VERIFICATION_FILE'),root))
 
 
 def load_settings(env_file=None, *, environ=None, root=ROOT):
@@ -217,11 +221,33 @@ def load_settings(env_file=None, *, environ=None, root=ROOT):
     credential_dir=values.get('CREDENTIALS_DIRECTORY')
     if isinstance(credential_dir,str) and credential_dir:
         for name,filename in (('CRYPTO_CARD_VAULT_FILE','owner-card.enc'),
-                              ('CRYPTO_CARD_KEY_FILE','owner-card.key')):
+                              ('CRYPTO_CARD_KEY_FILE','owner-card.key'),
+                              ('CRYPTO_RECEIVING_WALLET_FILE','receiving-wallet.json'),
+                              ('CRYPTO_WALLET_VERIFICATION_FILE','wallet-verification.json')):
             candidate=Path(credential_dir)/filename
             if not values.get(name) and candidate.is_file():
                 values[name]=str(candidate)
     return ApplicationSettings.from_mapping(values, root=root)
+
+
+def _receiving_wallet(settings):
+    if not settings.receiving_wallet_file and not settings.wallet_verification_file:
+        return None
+    if not settings.receiving_wallet_file or not settings.wallet_verification_file:
+        raise ConfigurationError('Receiving wallet and owner verification must both be installed')
+    from .receiving_wallet import ReceivingWallet
+    config=_private_json(settings.receiving_wallet_file)
+    proof=_private_json(settings.wallet_verification_file)
+    if (set(config)!={'network','token','account_path','account_xpub','first_address','fingerprint'}
+            or config['network']!='TRON' or config['token']!='USDT'
+            or config['account_path']!="m/44'/195'/0'"):
+        raise ConfigurationError('Receiving wallet configuration is unsupported')
+    wallet=ReceivingWallet(config['account_xpub'],config['first_address'])
+    if (config['fingerprint']!=wallet.fingerprint or set(proof)!={'fingerprint','first_address','first_child_address','owner_confirmed'}
+            or proof['owner_confirmed'] is not True or proof['fingerprint']!=wallet.fingerprint
+            or proof['first_address']!=wallet.address(0) or proof['first_child_address']!=wallet.address(1)):
+        raise ConfigurationError('Owner verification does not match the receiving wallet')
+    return wallet
 
 
 def _owner_card_executor(settings):
@@ -341,6 +367,13 @@ async def _preflight(settings, resources):
               'unique_cents_enabled': settings.unique_cents_enabled,
               'exclusive_poller_confirmed': settings.exclusive_poller_confirmed}
     errors = {}
+    wallet=None
+    try:
+        wallet=_receiving_wallet(settings)
+        checks['receiving_wallet_verified']=True
+    except Exception as exc:
+        checks['receiving_wallet_verified']=False
+        errors['receiving_wallet_verified']={'error_type':type(exc).__name__}
     async def step(name, operation):
         try:
             checks[name] = (await operation()) is True
@@ -387,11 +420,14 @@ async def _preflight(settings, resources):
             checks['automatic_payment_ready'] = resources.executor.automatic_payment_ready is True
         except Exception as exc:
             errors['automatic_payment_ready'] = {'error_type': type(exc).__name__}
-    required={name:passed for name,passed in checks.items() if name!='merchant_device_binding_verified'}
+    informational={'merchant_device_binding_verified'}
+    if wallet is not None:informational.add('unique_cents_enabled')
+    required={name:passed for name,passed in checks.items() if name not in informational}
     return {'ready': all(required.values()), 'checks': checks,
             'missing': [name for name, passed in required.items() if not passed],
             'errors': errors, 'server_payment_executor_missing': resources.executor is None,
             'binding_policy': settings.binding_policy,
+            'receiving_mode': 'wallet' if settings.receiving_wallet_file else 'binance',
             'real_device_flow_tested': False,
             'owner_card_vault_configured': bool(resources.card_vault and resources.card_vault.configured is True),
             'browser_runtime_probed': resources.browser_runtime_probed,
@@ -443,7 +479,9 @@ async def run(settings, *, factory=None, executor=None, stop=None):
             engine = Engine(ledger, store, delivery, live_purchase_enabled=True)
             worker = RuntimeWorker(ledger, watcher, engine)
             checkout = CheckoutService(ledger, settings.data_dir / 'uploads', resources.tron,
-                                       worker.readiness, address=settings.address, allow_unique_cents=True)
+                                       worker.readiness, address=settings.address,
+                                       allow_unique_cents=settings.unique_cents_enabled,
+                                       receiving_wallet=_receiving_wallet(settings))
             await run_bot(checkout, worker, token=settings.bot_token,
                           expected_bot_id=settings.expected_bot_id, expected_username=settings.expected_username,
                           exclusive_poller_confirmed=settings.exclusive_poller_confirmed, stop=stop)
