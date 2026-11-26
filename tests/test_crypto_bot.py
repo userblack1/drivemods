@@ -145,7 +145,7 @@ def test_invoice_selection_is_owner_only_and_replayed_click_returns_exact_same_i
     texts = outputs(session)
     assert texts[-1] == texts[-2] and '100.01 USDT' in texts[-1]
     assert TEST_ADDRESS in texts[-1] and 'Срок оплаты:' in texts[-1]
-    assert 'QR содержит адрес этого заказа' in texts[-1]
+    assert 'Скопировать адрес' in texts[-1] and 'QR' not in texts[-1]
 
 
 def test_eco_invoice_has_its_own_exact_amount(tmp_path):

@@ -12,11 +12,11 @@ import time
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (BufferedInputFile, CallbackQuery, CopyTextButton, ErrorEvent,
+from aiogram.types import (CallbackQuery, CopyTextButton, ErrorEvent,
                            InlineKeyboardButton, InlineKeyboardMarkup, Message)
 
 from .checkout import CheckoutUnavailable, invoice_text
-from .payment_qr import payment_details, payment_qr
+from .payment_qr import payment_details
 from .runtime import _TokenLogFilter
 
 
@@ -89,25 +89,20 @@ async def send_payment(message, invoice):
     try:
         address, amount = payment_details(invoice)
     except ValueError:
-        # Expiry can occur between the first check and rendering; don't issue
+        # Expiry can occur between the first check and validation; don't issue
         # fresh-looking payment instructions for that invoice.
         await message.answer('Счёт недоступен для оплаты. Проверьте /status ' + invoice['id'])
         return
     text = payment_text(invoice) + (
-        '\n\nQR содержит адрес этого заказа. В «Мой О!» выберите USDT TRC20, '
-        'укажите сумму из счёта и отсканируйте QR. Сумма в приложении может не подставиться автоматически.')
+        '\n\nОплата через «Мой О!»:\n'
+        '1. Откройте «Криптовалюта» и выберите USDT в сети TRON (TRC20).\n'
+        '2. Нажмите «Скопировать адрес» ниже и вставьте его в поле адреса получателя.\n'
+        '3. Укажите сумму из счёта, проверьте данные и подтвердите оплату.\n'
+        'Используйте этот адрес только для этого заказа.')
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text='Скопировать адрес', copy_text=CopyTextButton(text=address)),
         InlineKeyboardButton(text='Скопировать сумму', copy_text=CopyTextButton(text=amount))]])
-    try:
-        png = await asyncio.to_thread(payment_qr, invoice)
-        await message.answer_photo(BufferedInputFile(png, filename='payment-' + invoice['id'] + '.png'),
-                                   caption=text, reply_markup=keyboard)
-    except Exception as exc:
-        # Photo delivery can fail after Telegram accepted it. The fallback
-        # repeats the SAME invoice; never allocate another address or amount.
-        logging.getLogger(__name__).warning('Payment QR delivery deferred: %s', type(exc).__name__)
-        await message.answer(text, reply_markup=keyboard)
+    await message.answer(text, reply_markup=keyboard)
 
 
 def make_router(checkout):
