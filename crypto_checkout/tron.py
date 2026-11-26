@@ -1,7 +1,11 @@
 """Read-only TRON mainnet USDT verification. Never signs or broadcasts transfers."""
 from dataclasses import dataclass
+import asyncio
+from email.utils import parsedate_to_datetime
 import hashlib
+import math
 import re
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -13,6 +17,10 @@ TRANSFER = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
 class HistoryPageLimit(RuntimeError):
     """The caller must narrow its time interval, never advance a partial cursor."""
+
+
+class TronRateLimited(RuntimeError):
+    """Read deferred locally until the provider's cooldown has elapsed."""
 
 
 def address_bytes(address: str) -> bytes:
@@ -90,10 +98,20 @@ def parse_solid_receipt(receipt: dict, expected_txid: str) -> list[Transfer]:
 
 
 class TronReader:
-    def __init__(self, api_key: str = '', *, base_url='https://api.trongrid.io', transport=None):
+    def __init__(self, api_key: str = '', *, base_url='https://api.trongrid.io', transport=None,
+                 minimum_interval=1.1, clock=time.monotonic, wall_clock=time.time, sleep=asyncio.sleep):
         url = urlparse(base_url)
         if url.scheme != 'https' or url.username or url.password or url.query or url.fragment or url.path not in ('', '/'):
             raise ValueError('Use an HTTPS TRON node origin')
+        if (type(minimum_interval) not in (int, float) or not math.isfinite(minimum_interval)
+                or not 0 <= minimum_interval <= 300):
+            raise ValueError('Invalid TRON request interval')
+        # TronGrid charges credits per request, not one credit per HTTP call:
+        # history=200 and solidity reads=80. Serialize all paths through one gate
+        # so concurrent invoices and pagination cannot burst past the quota.
+        self._lock = asyncio.Lock()
+        self._next = self._cooldown = 0.0
+        self._interval, self._clock, self._wall_clock, self._sleep = minimum_interval, clock, wall_clock, sleep
         self.client = httpx.AsyncClient(base_url=base_url.rstrip('/'), timeout=20, follow_redirects=False,
                                        headers={'TRON-PRO-API-KEY': api_key} if api_key else {},
                                        transport=transport, trust_env=False)
@@ -101,14 +119,45 @@ class TronReader:
     async def close(self):
         await self.client.aclose()
 
-    async def _json(self, method, path, **kwargs):
+    def _backoff(self, response):
+        delay = 300.0 if response.status_code == 403 else 30.0
+        retry = response.headers.get('Retry-After', '')
         try:
-            response = await self.client.request(method, path, **kwargs)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            # No request bodies, credentials, or full URLs in errors.
-            raise RuntimeError('TRON read failed: ' + type(exc).__name__) from None
+            seconds = float(retry)
+            if math.isfinite(seconds):
+                delay = max(delay, seconds)
+        except ValueError:
+            try:
+                delay = max(delay, parsedate_to_datetime(retry).timestamp() - self._wall_clock())
+            except (ValueError, TypeError, OverflowError):
+                pass
+        # TronGrid may provide only a JSON "suspended for 29 s" message.
+        # Parse a duration, never propagate the provider body into logs.
+        match = re.search(r'suspended for\s+(\d{1,9})\s*s', response.text[:4096], re.I)
+        if match:
+            delay = max(delay, int(match[1]))
+        return delay + 1.0
+
+    async def _json(self, method, path, **kwargs):
+        async with self._lock:
+            if self._clock() < self._cooldown:
+                raise TronRateLimited('TRON provider cooldown; payment remains pending')
+            delay = self._next - self._clock()
+            if delay > 0:
+                await self._sleep(delay)
+            self._next = self._clock() + self._interval
+            try:
+                response = await self.client.request(method, path, **kwargs)
+                if response.status_code in (403, 429):
+                    self._cooldown = self._clock() + self._backoff(response)
+                    raise TronRateLimited('TRON provider cooldown; payment remains pending')
+                response.raise_for_status()
+                return response.json()
+            except TronRateLimited:
+                raise
+            except Exception as exc:
+                # No request bodies, credentials, or full URLs in errors.
+                raise RuntimeError('TRON read failed: ' + type(exc).__name__) from None
 
     async def height(self) -> int:
         data = await self._json('POST', '/walletsolidity/getnowblock', json={})
