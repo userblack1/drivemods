@@ -142,22 +142,30 @@ class TronReader:
         async with self._lock:
             if self._clock() < self._cooldown:
                 raise TronRateLimited('TRON provider cooldown; payment remains pending')
-            delay = self._next - self._clock()
-            if delay > 0:
-                await self._sleep(delay)
-            self._next = self._clock() + self._interval
-            try:
-                response = await self.client.request(method, path, **kwargs)
-                if response.status_code in (403, 429):
-                    self._cooldown = self._clock() + self._backoff(response)
-                    raise TronRateLimited('TRON provider cooldown; payment remains pending')
-                response.raise_for_status()
-                return response.json()
-            except TronRateLimited:
-                raise
-            except Exception as exc:
-                # No request bodies, credentials, or full URLs in errors.
-                raise RuntimeError('TRON read failed: ' + type(exc).__name__) from None
+            # These three node endpoints only read chain data. A transient
+            # connection/read failure can be retried without creating a payment.
+            # Every attempt still goes through the same frequency gate.
+            for attempt in range(3):
+                delay = self._next - self._clock()
+                if delay > 0:
+                    await self._sleep(delay)
+                self._next = self._clock() + self._interval
+                try:
+                    response = await self.client.request(method, path, **kwargs)
+                    if response.status_code in (403, 429):
+                        self._cooldown = self._clock() + self._backoff(response)
+                        raise TronRateLimited('TRON provider cooldown; payment remains pending')
+                    response.raise_for_status()
+                    return response.json()
+                except TronRateLimited:
+                    raise
+                except httpx.TransportError as exc:
+                    if attempt == 2:
+                        raise RuntimeError('TRON read failed: ' + type(exc).__name__) from None
+                    self._next = max(self._next, self._clock() + 2 ** attempt)
+                except Exception as exc:
+                    # No request bodies, credentials, or full URLs in errors.
+                    raise RuntimeError('TRON read failed: ' + type(exc).__name__) from None
 
     async def height(self) -> int:
         data = await self._json('POST', '/walletsolidity/getnowblock', json={})

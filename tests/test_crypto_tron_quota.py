@@ -109,6 +109,32 @@ def test_pagination_rate_limit_never_returns_partial_history():
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize('failures', [1, 2, 3])
+def test_transient_read_transport_errors_retry_with_pacing_and_a_bound(failures):
+    clock, calls = Clock(), []
+
+    def handler(request):
+        calls.append(clock())
+        if len(calls) <= failures:
+            raise httpx.ConnectTimeout('synthetic secret must not be logged', request=request)
+        return httpx.Response(200, json={'block_header': {'raw_data': {'number': 999}}})
+
+    async def scenario():
+        reader = TronReader(transport=httpx.MockTransport(handler), clock=clock, sleep=clock.sleep)
+        try:
+            if failures == 3:
+                with pytest.raises(RuntimeError) as caught:
+                    await reader.height()
+                assert str(caught.value) == 'TRON read failed: ConnectTimeout'
+            else:
+                assert await reader.height() == 999
+        finally:
+            await reader.close()
+    asyncio.run(scenario())
+    assert len(calls) == min(failures + 1, 3)
+    assert all(b - a >= 1.1 - 1e-9 for a, b in zip(calls, calls[1:]))
+
+
 @pytest.mark.parametrize('interval', [True, -1, float('nan'), float('inf'), 301])
 def test_invalid_interval_rejected(interval):
     with pytest.raises(ValueError):
